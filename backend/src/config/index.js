@@ -95,9 +95,17 @@ export const config = {
   },
   secrets: {
     // B4: klucz szyfrowania sekretow w bazie (TOTP, webhook). Wymagany w produkcji.
-    encKey: process.env.SECRET_ENC_KEY || (() => {
-      if (bool(process.env.ALLOW_EPHEMERAL_KEYS, false)) return randomBytes(32).toString('hex');
-      throw new Error('Brak SECRET_ENC_KEY. Wygeneruj: openssl rand -hex 32');
+    encKey: (() => {
+      const v = process.env.SECRET_ENC_KEY;
+      if (!v) {
+        if (bool(process.env.ALLOW_EPHEMERAL_KEYS, false)) return randomBytes(32).toString('hex');
+        throw new Error('Brak SECRET_ENC_KEY. Wygeneruj: openssl rand -hex 32');
+      }
+      // Walidacja formatu przy starcie: dokladnie 64 znaki HEX (32 bajty).
+      if (!/^[0-9a-fA-F]{64}$/.test(v)) {
+        throw new Error('SECRET_ENC_KEY musi byc 64-znakowa wartoscia HEX (32 bajty). Uzyj: openssl rand -hex 32');
+      }
+      return v.toLowerCase();
     })(),
   },
   keys: loadEd25519Keys(),

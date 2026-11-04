@@ -63,11 +63,11 @@ configure_postgres() {
     DB_PASS="$(openssl rand -hex 24)"
     su - postgres -c "psql -c \"CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';\""
     echo "${DB_PASS}" > "/etc/${APP_NAME}/.db_password"
-    chmod 600 "/etc/${APP_NAME}/.db_password"
+    chown root:root "/etc/${APP_NAME}/.db_password"; chmod 600 "/etc/${APP_NAME}/.db_password"
     log "Utworzono użytkownika bazy ${DB_USER} (hasło zapisane w /etc/${APP_NAME}/.db_password)."
   else
     DB_PASS="$(cat /etc/${APP_NAME}/.db_password 2>/dev/null || true)"
-    [ -z "$DB_PASS" ] && { DB_PASS="$(openssl rand -hex 24)"; su - postgres -c "psql -c \"ALTER ROLE ${DB_USER} PASSWORD '${DB_PASS}';\""; echo "${DB_PASS}" > "/etc/${APP_NAME}/.db_password"; chmod 600 "/etc/${APP_NAME}/.db_password"; }
+    [ -z "$DB_PASS" ] && { DB_PASS="$(openssl rand -hex 24)"; su - postgres -c "psql -c \"ALTER ROLE ${DB_USER} PASSWORD '${DB_PASS}';\""; echo "${DB_PASS}" > "/etc/${APP_NAME}/.db_password"; chown root:root "/etc/${APP_NAME}/.db_password"; chmod 600 "/etc/${APP_NAME}/.db_password"; }
     log "Użytkownik bazy ${DB_USER} już istnieje."
   fi
 
@@ -84,10 +84,10 @@ configure_postgres() {
 ensure_config_dirs() {
   # A1: /etc/d01i-tweakz musi istnieć przed pierwszym zapisem sekretu (.db_password w configure_postgres).
   if [ ! -d "/etc/${APP_NAME}" ]; then
-    install -d -m 700 -o root -g root "/etc/${APP_NAME}"
-    log "Utworzono /etc/${APP_NAME} (700, root:root)."
+    install -d -m 750 -o root -g "${APP_USER}" "/etc/${APP_NAME}"
+    log "Utworzono /etc/${APP_NAME} (750, root:${APP_USER})."
   fi
-  install -d -m 700 -o root -g root "/etc/${APP_NAME}/keys" 2>/dev/null || true
+  install -d -m 750 -o root -g "${APP_USER}" "/etc/${APP_NAME}/keys" 2>/dev/null || true
   mkdir -p "${LOG_DIR}" && chown "${APP_USER}:${APP_USER}" "${LOG_DIR}" 2>/dev/null || true
 }
 
@@ -111,7 +111,7 @@ deploy_app() {
 }
 
 generate_secrets_and_keys() {
-  install -d -m 700 -o root -g root "/etc/${APP_NAME}" "${KEYS_DIR}"
+  install -d -m 750 -o root -g "${APP_USER}" "/etc/${APP_NAME}" "${KEYS_DIR}"
   mkdir -p "${LOG_DIR}"
 
   if [ ! -f "${KEYS_DIR}/ed25519_private.pem" ]; then
@@ -123,6 +123,7 @@ generate_secrets_and_keys() {
   chmod 644 "${KEYS_DIR}/ed25519_public.pem"
 
   PEPPER="$(openssl rand -hex 32)"
+  ENC_KEY="$(openssl rand -hex 32)"   # 64 znaki HEX = 32 bajty (AES-256-GCM)
   if [ ! -f "${ENV_FILE}" ]; then
     DB_PASS="$(cat /etc/${APP_NAME}/.db_password)"
     cat > "${ENV_FILE}" <<EOF
@@ -132,6 +133,7 @@ HOST=127.0.0.1
 PUBLIC_BASE_URL=https://${CADDY_DOMAIN}
 DATABASE_URL=postgres://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}
 SECURITY_PEPPER=${PEPPER}
+SECRET_ENC_KEY=${ENC_KEY}
 ED25519_PRIVATE_KEY_PATH=${KEYS_DIR}/ed25519_private.pem
 ED25519_PUBLIC_KEY_PATH=${KEYS_DIR}/ed25519_public.pem
 ADMIN_BOOTSTRAP_ENABLED=true
@@ -145,11 +147,27 @@ EOF
     log "Wygenerowano ${ENV_FILE} (sekretny). Zmień hasło bootstrap admina po pierwszym logowaniu!"
   else
     log "Plik ${ENV_FILE} już istnieje - pozostawiam bez zmian."
+    if ! grep -q '^SECRET_ENC_KEY=[0-9a-f]\{64\}$' "${ENV_FILE}"; then
+      # Jezeli w bazie sa juz zaszyfrowane sekrety, brak klucza uniemozliwi ich odczyt.
+      ENC_ROWS="$(su - postgres -c "psql -d ${DB_NAME} -tAc \"SELECT (SELECT count(*) FROM admins WHERE totp_secret LIKE 'enc:v1:%') + (SELECT count(*) FROM settings WHERE key='discord_webhook' AND value::text LIKE '%enc:v1:%')\"" 2>/dev/null || echo 0)"
+      if [ "${ENC_ROWS:-0}" -gt 0 ]; then
+        err "W bazie istnieja zaszyfrowane sekrety, ale ${ENV_FILE} nie zawiera poprawnego SECRET_ENC_KEY."
+        err "Wygenerowanie nowego klucza uniemozliwiloby odczyt istniejacych danych."
+        err "Przywroc oryginalny SECRET_ENC_KEY (32 bajty HEX) do ${ENV_FILE} i uruchom ponownie."
+        exit 1
+      fi
+      # Brak zaszyfrowanych rekordow: dopisz klucz (pierwsza instalacja z nowym kodem na starej konfiguracji).
+      echo "SECRET_ENC_KEY=${ENC_KEY}" >> "${ENV_FILE}"
+      log "Dodano SECRET_ENC_KEY do istniejacego ${ENV_FILE} (w bazie nie bylo zaszyfrowanych sekretow)."
+    fi
   fi
   # Klucze i .env czyta tylko aplikacja; katalog zostaje root, pliki root:${APP_USER} 640/600.
   chown -R "root:${APP_USER}" "/etc/${APP_NAME}"
-  chmod 640 "${ENV_FILE}" "/etc/${APP_NAME}/.db_password" 2>/dev/null || true
-  chmod 640 "${KEYS_DIR}/ed25519_private.pem"  # czytelny dla grupy d01i (usluga), nie dla innych
+  chmod 750 "/etc/${APP_NAME}" "${KEYS_DIR}"
+  chmod 640 "${ENV_FILE}"                       # root:d01i - czyta tylko usluga
+  chown root:root "/etc/${APP_NAME}/.db_password" 2>/dev/null || true
+  chmod 600 "/etc/${APP_NAME}/.db_password"     # tylko root (instalator)
+  chmod 640 "${KEYS_DIR}/ed25519_private.pem"   # root:d01i - czyta tylko usluga
   chmod 644 "${KEYS_DIR}/ed25519_public.pem"
   chown -R "${APP_USER}:${APP_USER}" "${LOG_DIR}"
 }

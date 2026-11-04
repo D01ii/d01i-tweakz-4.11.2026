@@ -58,6 +58,22 @@ const LOCK_MINUTES = 15;
  * Logowanie admina z ochrona przed brute-force (licznik + blokada czasowa w bazie)
  * oraz opcjonalnym TOTP (MFA). Zwraca { sessionToken, csrfToken } lub { totpRequired }.
  */
+
+/**
+ * Atomowe zuzycie jednorazowego kodu odzyskiwania: pojedynczy UPDATE usuwa kod
+ * tylko wtedy, gdy jeszcze istnieje - tylko jedno rownolegle zadanie dostanie
+ * potwierdzenie (RETURNING), pozostale dostana 0 wierszy.
+ */
+export async function consumeRecoveryCode(adminId, codeHash, client = null) {
+  const q = client || { query };
+  const r = await q.query(
+    `UPDATE admins SET recovery_codes = array_remove(recovery_codes, $2)
+     WHERE id = $1 AND $2 = ANY(recovery_codes) RETURNING id`,
+    [adminId, codeHash]
+  );
+  return r.rows.length > 0;
+}
+
 export async function loginAdmin({ username, password, totp = null, recoveryCode = null, ipHash = null, userAgent = null }) {
   const u = (username || '').toLowerCase().trim();
   const r = await query(`SELECT * FROM admins WHERE username = $1`, [u]);
@@ -85,13 +101,10 @@ export async function loginAdmin({ username, password, totp = null, recoveryCode
     let mfaOk = false;
     if (totp && totpSecret && authenticator.check(totp, totpSecret)) mfaOk = true;
     if (!mfaOk && recoveryCode) {
-      const codeHash = sha256Hex(recoveryCode.trim().toUpperCase());
-      if (Array.isArray(admin.recovery_codes) && admin.recovery_codes.includes(codeHash)) {
+      // Atomowe zuzycie kodu (odporne na rownolegle proby): tylko jedno zadanie go usunie.
+      const used = await consumeRecoveryCode(admin.id, sha256Hex(recoveryCode.trim().toUpperCase()));
+      if (used) {
         mfaOk = true;
-        await query(
-          `UPDATE admins SET recovery_codes = array_remove(recovery_codes, $2) WHERE id = $1`,
-          [admin.id, codeHash]
-        );
         await logAudit({ actorType: 'admin', actorId: admin.id, action: 'admin.mfa.recovery_used', ipHash, severity: 'warning' });
       }
     }
@@ -167,11 +180,7 @@ export async function disableTotp(adminId, { password, totp = null, recoveryCode
     let second = false;
     if (totp && r.rows[0].totp_secret && authenticator.check(totp, decryptSecret(r.rows[0].totp_secret))) second = true;
     if (!second && recoveryCode) {
-      const codeHash = sha256Hex(recoveryCode.trim().toUpperCase());
-      if (Array.isArray(r.rows[0].recovery_codes) && r.rows[0].recovery_codes.includes(codeHash)) {
-        second = true;
-        await query(`UPDATE admins SET recovery_codes = array_remove(recovery_codes, $2) WHERE id = $1`, [adminId, codeHash]);
-      }
+      second = await consumeRecoveryCode(adminId, sha256Hex(recoveryCode.trim().toUpperCase()));
     }
     if (!second) throw new Error('Wymagany aktualny kod TOTP lub kod odzyskiwania');
   }

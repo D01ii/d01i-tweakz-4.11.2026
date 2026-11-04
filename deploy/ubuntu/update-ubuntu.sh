@@ -19,23 +19,26 @@ SRC_DIR="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../backend" && pwd)}"
 [ -d "${SRC_DIR}/src" ] || { echo "Nie znaleziono kodu źródłowego: ${SRC_DIR}" >&2; exit 1; }
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
-TMP_BACKUP="$(mktemp -d /var/backups/${APP_NAME}/code-${STAMP}-XXXX)"
+
+# Katalog backupow musi istniec PRZED mktemp; nie kontynuujemy bez mozliwosci zapisu.
+mkdir -p "${BACKUP_DIR}" || { echo "[update][BŁĄD] nie mozna utworzyc ${BACKUP_DIR}" >&2; exit 1; }
+[ -w "${BACKUP_DIR}" ] || { echo "[update][BŁĄD] ${BACKUP_DIR} nie jest zapisywalny" >&2; exit 1; }
+TMP_BACKUP="$(mktemp -d "${BACKUP_DIR}/code-${STAMP}-XXXX")"
 
 echo "[update] 1/6 Backup bazy danych..."
-mkdir -p "${BACKUP_DIR}"
 sudo -u postgres pg_dump d01i_tweakz | gzip > "${BACKUP_DIR}/pre-update-${STAMP}.sql.gz"
 chmod 600 "${BACKUP_DIR}/pre-update-${STAMP}.sql.gz"
 echo "[update]    zapisano ${BACKUP_DIR}/pre-update-${STAMP}.sql.gz"
 
-echo "[update] 2/6 Backup kodu i manifestu..."
-cp -a "${APP_DIR}/src" "${APP_DIR}/package.json" "${APP_DIR}/package-lock.json" "${TMP_BACKUP}/"
+echo "[update] 2/6 Backup kodu, migracji i manifestu..."
+cp -a "${APP_DIR}/src" "${APP_DIR}/migrations" "${APP_DIR}/package.json" "${APP_DIR}/package-lock.json" "${TMP_BACKUP}/"
 echo "[update]    backup kodu: ${TMP_BACKUP}"
 
 rollback() {
   echo "[update][BŁĄD] Rollback kodu i zależności do stanu sprzed aktualizacji..." >&2
   systemctl stop d01i-backend 2>/dev/null || true
-  rm -rf "${APP_DIR}/src"
-  cp -a "${TMP_BACKUP}/src" "${TMP_BACKUP}/package.json" "${TMP_BACKUP}/package-lock.json" "${APP_DIR}/"
+  rm -rf "${APP_DIR}/src" "${APP_DIR}/migrations"
+  cp -a "${TMP_BACKUP}/src" "${TMP_BACKUP}/migrations" "${TMP_BACKUP}/package.json" "${TMP_BACKUP}/package-lock.json" "${APP_DIR}/"
   (cd "${APP_DIR}" && npm ci --omit=dev --no-audit --no-fund) || echo "[update] npm ci podczas rollbacku nieudane - sprawdź ręcznie" >&2
   chown -R "${APP_NAME}:${APP_USER:-${APP_NAME}}" "${APP_DIR}" 2>/dev/null || chown -R "${APP_NAME}:${APP_NAME}" "${APP_DIR}"
   systemctl start d01i-backend || true

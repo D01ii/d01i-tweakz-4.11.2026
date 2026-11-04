@@ -146,6 +146,7 @@ function New-SecretsAndKeys($dbPass) {
     }
     if (-not (Test-Path $EnvFile)) {
         $pepper = New-SecureRandomString 64
+        $encKey = New-SecureRandomString 64   # SECRET_ENC_KEY: 64 znaki HEX = 32 bajty (AES-256-GCM)
         $bootstrapPass = New-SecureRandomString 32
         @"
 NODE_ENV=development
@@ -154,6 +155,7 @@ HOST=127.0.0.1
 PUBLIC_BASE_URL=$PublicBaseUrl
 DATABASE_URL=postgres://${DbUser}:$dbPass@127.0.0.1:5432/$DbName
 SECURITY_PEPPER=$pepper
+SECRET_ENC_KEY=$encKey
 ED25519_PRIVATE_KEY_PATH=$KeysDir\ed25519_private.pem
 ED25519_PUBLIC_KEY_PATH=$KeysDir\ed25519_public.pem
 ADMIN_BOOTSTRAP_ENABLED=true
@@ -167,6 +169,21 @@ DISCORD_WEBHOOK_ENABLED=false
         Write-Info "Wygenerowano $EnvFile (bootstrap admin: admin / hasło w pliku .env)."
     } else {
         Write-Info "Plik .env już istnieje - bez zmian."
+        # Rerun: jesli .env nie ma poprawnego SECRET_ENC_KEY, a w bazie sa zaszyfrowane
+        # sekrety - NIE generuj nowego klucza (stracilibysmy dostep do danych).
+        $hasKey = Select-String -Path $EnvFile -Pattern '^SECRET_ENC_KEY=[0-9a-f]{64}$' -Quiet
+        if (-not $hasKey) {
+            $psql = Get-PsqlPath
+            $encRows = & $psql -U $DbUser -h 127.0.0.1 -d $DbName -tAc "SELECT (SELECT count(*) FROM admins WHERE totp_secret LIKE 'enc:v1:%') + (SELECT count(*) FROM settings WHERE key='discord_webhook' AND value::text LIKE '%enc:v1:%')" 2>$null
+            if ([int]($encRows | Select-Object -First 1) -gt 0) {
+                Write-Err2 "W bazie sa zaszyfrowane sekrety, ale .env nie ma poprawnego SECRET_ENC_KEY."
+                Write-Err2 "Przywroc oryginalny klucz (64 znaki HEX) do $EnvFile - nowy klucz uniemozliwi odczyt danych."
+                exit 1
+            }
+            $encKey = New-SecureRandomString 64
+            Add-Content -Path $EnvFile -Value "SECRET_ENC_KEY=$encKey"
+            Write-Info "Dodano SECRET_ENC_KEY do istniejacego .env (w bazie nie bylo zaszyfrowanych sekretow)."
+        }
     }
 }
 

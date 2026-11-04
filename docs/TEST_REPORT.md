@@ -1,13 +1,13 @@
 # Raport testów — D01i Tweakz Backend (wydanie 1.0.0)
 
-**Data uruchomienia:** 2026-11-04 (po audycie) · **Środowisko:** Node.js v22.22.3, PostgreSQL (instancja testowa), Debian sandbox
+**Data uruchomienia:** 2026-11-04 (po dwóch rundach audytu) · **Środowisko:** Node.js v22.22.3, PostgreSQL (instancja testowa), Debian sandbox
 **Polecenie:** `node --test --test-concurrency=1 "test/*.test.js"` (w `backend/`)
 
-## Wynik: 39 / 39 PASS, 0 FAIL
+## Wynik: 46 / 46 PASS, 0 FAIL (po drugiej rundzie audytu)
 
 ```
-# tests 39
-# pass 39
+# tests 46
+# pass 46
 # fail 0
 ```
 
@@ -59,3 +59,5 @@ Nowe testy regresyjne z audytu: stary token po rotacji → 401; 6 równoczesnych
 - Testy używają osobnych baz `d01i_test_*`; produkcyjna baza nie jest dotykana.
 - Argon2 w testach ma obniżony koszt pamięci (zmienne `ARGON2_MEMORY_COST/ARGON2_TIME_COST`);
   produkcja używa domyślnych 64 MB / 3 iteracje (Argon2id).
+
+### Runda 2 (FOLLOWUP_AUDIT): migracje (idempotentność, błąd=brak częściowych zmian, advisory lock przy równoczesności), migracja legacy sekretów, atomowe zużycie recovery code (8 równoczesnych prób → 1 sukces), walidacja SECRET_ENC_KEY.

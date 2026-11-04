@@ -33,6 +33,9 @@ export async function migrate({ log = console.log } = {}) {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // Blokada doradcza na czas calej transakcji: dwa rownolegle migmatory
+      // nie wykonaja tej samej migracji jednoczesnie.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['d01i_tweakz_migrations']);
       await client.query(sql);
       await client.query('INSERT INTO schema_migrations(name) VALUES ($1)', [file]);
       await client.query('COMMIT');

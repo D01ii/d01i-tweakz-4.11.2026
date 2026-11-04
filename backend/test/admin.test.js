@@ -216,3 +216,21 @@ test('zwykly admin nie moze listowac administratorow (B6 - 403)', async () => {
   const stats = await t.client('/api/v1/admin/ops/stats', { headers: { Cookie: cookieHeader } });
   assert.equal(stats.status, 200);
 });
+
+test('recovery code przy rownoleglych probach logowania zuzywa sie ATOMOWO - tylko jedno OK', async () => {
+  const { createAdmin, setupTotp, enableTotp, loginAdmin } = await import('../src/services/adminService.js');
+  const { authenticator } = await import('otplib');
+  await createAdmin({ username: 'raceadmin', password: 'super-secret-password-123' });
+  const id = (await t.query(`SELECT id FROM admins WHERE username='raceadmin'`)).rows[0].id;
+  const { secret } = await setupTotp(id);
+  const { recoveryCodes } = await enableTotp(id, authenticator.generate(secret));
+  const code = recoveryCodes[0];
+  const results = await Promise.all(
+    Array.from({ length: 8 }, () => loginAdmin({ username: 'raceadmin', password: 'super-secret-password-123', recoveryCode: code }))
+  );
+  const okCount = results.filter((r) => r.ok).length;
+  assert.equal(okCount, 1, `dokładnie jedno uwierzytelnienie, otrzymano: ${okCount}`);
+  // kod juz zuzyty - kolejna proba odrzucona
+  const after = await loginAdmin({ username: 'raceadmin', password: 'super-secret-password-123', recoveryCode: code });
+  assert.equal(after.ok, false);
+});

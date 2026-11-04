@@ -1,35 +1,53 @@
 # D01i Tweakz - bezpieczne zatrzymanie backendu (Windows).
-# A5: NIGDY nie zabijamy obcego procesu tylko dlatego, ze nasluchuje na porcie 8080.
-# Zatrzymujemy wylacznie proces, ktorego PID mamy w pliku backend.pid I ktorego
-# sciezka/komenda jednoznacznie wskazuje na katalog instalacji D01iTweakz.
+# Zatrzymujemy WYLACZNIE proces zweryfikowany przez backend.pid.json:
+#   PID + czas startu procesu (ochrona przed ponownym przydzieleniem PID)
+#   + sciezka node.exe + pelna sciezka src\index.js z katalogu instalacji.
+# NIGDY nie zabijamy procesu na podstawie samego portu 8080 ani samego PID.
+# Uwaga: zmienna nazywa sie $backendPid, bo $pid kolidowalaby z automatycznym $PID.
 #requires -Version 5.1
 param(
     [string]$EnvFile = "$env:ProgramData\D01iTweakz\.env",
     [string]$InstallDir = "$env:ProgramFiles\D01iTweakz"
 )
 $DataDir = Split-Path $EnvFile
-$PidFile = Join-Path $DataDir 'backend.pid'
+$PidFile = Join-Path $DataDir 'backend.pid.json'
 
 if (-not (Test-Path $PidFile)) {
-    Write-Host "Brak pliku PID ($PidFile) - backend nie byl uruchomiony przez Start-Backend.ps1. Nic nie zatrzymuję."
+    Write-Host "Brak pliku PID ($PidFile) - backend nie byl uruchomiony przez Start-Backend.ps1. Nic nie zatrzymuje."
     exit 0
 }
-$pid = (Get-Content $PidFile).Trim()
-$p = Get-Process -Id $pid -ErrorAction SilentlyContinue
+try { $meta = Get-Content $PidFile -Raw | ConvertFrom-Json } catch {
+    Write-Host "Plik PID uszkodzony - usuwam go i nie zatrzymuje zadnego procesu." -ForegroundColor Yellow
+    Remove-Item $PidFile -ErrorAction SilentlyContinue
+    exit 1
+}
+$backendPid = [int]$meta.Pid
+$p = Get-Process -Id $backendPid -ErrorAction SilentlyContinue
 if (-not $p) {
-    Write-Host "Proces PID $pid już nie istnieje. Usuwam plik PID."
+    Write-Host "Proces PID $backendPid juz nie istnieje - czyszcze nieaktualny plik PID."
     Remove-Item $PidFile -ErrorAction SilentlyContinue
     exit 0
 }
-# Weryfikacja: proces musi nalezec do D01iTweakz (sciezka exe lub katalog roboczy/linia polecen).
-$cmdLine = $null
-try { $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $pid").CommandLine } catch {}
-$verified = ($p.Path -like "*D01iTweakz*") -or ($cmdLine -like "*D01iTweakz*") -or ($cmdLine -match [regex]::Escape($InstallDir))
+
+# Weryfikacja tozsamosci przed zabiciem:
+$verified = $true
+if ($p.StartTime -ne [datetime]$meta.StartTime) { $verified = $false }          # PID przejety przez inny proces
+if ($p.Path -ne $meta.NodeExe) { $verified = $false }
+$expectedScript = Join-Path $InstallDir 'src\index.js'
+if ($meta.Script -ne $expectedScript) { $verified = $false }
+try {
+    $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $backendPid").CommandLine
+    if ($cmdLine -and $cmdLine -notmatch [regex]::Escape($expectedScript)) { $verified = $false }
+} catch {
+    # Nie mozemy odczytac linii polecen - nie ryzykujemy: weryfikujemy tylko na podstawie metadanych.
+    Write-Host "Nie udalo sie odczytac linii polecen procesu - weryfikacja tylko po PID+StartTime+sciezce." -ForegroundColor Yellow
+}
+
 if (-not $verified) {
-    Write-Host "UWAGA: proces PID $pid ($($p.Path)) NIE wyglada na backend D01iTweakz - NIE zatrzymuje go." -ForegroundColor Yellow
-    Write-Host "Usun plik $PidFile recznie, jesli to falszywy alarm."
+    Write-Host "UWAGA: proces PID $backendPid ($($p.Path)) NIE przechodzi weryfikacji tozsamosci - NIE zatrzymuje go." -ForegroundColor Yellow
+    Write-Host "Jesli to falszywy alarm, usun recznie: $PidFile"
     exit 1
 }
-Stop-Process -Id $pid -Force
+Stop-Process -Id $backendPid -Force
 Remove-Item $PidFile -ErrorAction SilentlyContinue
-Write-Host "Backend (PID $pid) zatrzymany."
+Write-Host "Backend (PID $backendPid) zatrzymany."

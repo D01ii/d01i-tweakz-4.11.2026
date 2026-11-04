@@ -1,5 +1,7 @@
-# D01i Tweakz - start backendu (Windows). Zapisuje PID do pliku, zeby Stop-Backend
-# mogl zweryfikowac, ze zatrzymuje WLASNY proces (A5 - nigdy obcego na porcie 8080).
+# D01i Tweakz - start backendu (Windows). Bezpieczna identyfikacja wlasnego procesu:
+# zapisujemy PID + czas startu + pelna sciezke skryptu, zeby Stop-Backend mogl
+# zweryfikowac tozsamosc procesu (takze po ponownym przydzieleniu PID).
+# Uwaga: NIE uzywamy tu zmiennej $pid - koliduje z automatyczna zmienna $PID.
 #requires -Version 5.1
 param(
     [string]$InstallDir = "$env:ProgramFiles\D01iTweakz",
@@ -12,27 +14,46 @@ if (-not (Test-Path $EnvFile)) { Write-Error "Brak $EnvFile - uruchom najpierw I
 foreach ($line in (Get-Content $EnvFile)) {
     if ($line -match '^\s*([A-Z_]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') }
 }
-$PidFile = Join-Path $DataDir 'backend.pid'
+$PidFile = Join-Path $DataDir 'backend.pid.json'
 $log = Join-Path $DataDir 'backend.log'
 $logErr = Join-Path $DataDir 'backend.err.log'
+$EntryScript = Join-Path $InstallDir 'src\index.js'   # PELNA sciezka, nie wzgledna
+if (-not (Test-Path $EntryScript)) { Write-Error "Brak $EntryScript - zainstaluj backend najpierw."; exit 1 }
+$NodeExe = (Get-Command node).Source                  # PELNA sciezka do node.exe
 
-# Jesli nasz backend juz dziala (PID zweryfikowany), nie startuj drugiego.
-if (Test-Path $PidFile) {
-    $oldPid = Get-Content $PidFile -ErrorAction SilentlyContinue
-    $p = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
-    if ($p -and $p.Path -like "*D01iTweakz*") { Write-Host "Backend już działa (PID $oldPid)."; exit 0 }
-    Remove-Item $PidFile -ErrorAction SilentlyContinue
+function Test-OurBackendRunning {
+    if (-not (Test-Path $PidFile)) { return $null }
+    try {
+        $meta = Get-Content $PidFile -Raw | ConvertFrom-Json
+        $p = Get-Process -Id $meta.Pid -ErrorAction SilentlyContinue
+        if (-not $p) { return $null }
+        # Weryfikacja: PID + czas startu (ochrona przed ponownym uzyciem PID) + sciezka exe/args
+        if ($p.StartTime -ne [datetime]$meta.StartTime) { return $null }
+        if ($p.Path -ne $NodeExe) { return $null }
+        return $p
+    } catch { return $null }
 }
 
-Write-Host "Start backendu (log: $log)..."
-$proc = Start-Process -FilePath node -ArgumentList "src/index.js" -WorkingDirectory $InstallDir `
+$running = Test-OurBackendRunning
+if ($running) { Write-Host "Backend już działa (PID $($running.Id), start $($running.StartTime))."; exit 0 }
+if (Test-Path $PidFile) { Remove-Item $PidFile -ErrorAction SilentlyContinue }  # stary/nieaktualny plik PID
+
+Write-Host "Start backendu: $NodeExe $EntryScript (log: $log)..."
+$proc = Start-Process -FilePath $NodeExe -ArgumentList "`"$EntryScript`"" -WorkingDirectory $InstallDir `
     -RedirectStandardOutput $log -RedirectStandardError $logErr -PassThru
-"$($proc.Id)" | Out-File $PidFile -Encoding ascii -NoNewline
-Write-Host "PID zapisany: $PidFile (PID $($proc.Id))"
+$meta = [ordered]@{
+    Pid       = $proc.Id
+    StartTime = $proc.StartTime.ToString('o')
+    NodeExe   = $NodeExe
+    Script    = $EntryScript
+    StartedAt = (Get-Date -Format 'o')
+}
+$meta | ConvertTo-Json | Out-File $PidFile -Encoding utf8
+Write-Host "Zapisano $PidFile (PID $($proc.Id))"
 Start-Sleep -Seconds 3
 try {
     $r = Invoke-RestMethod "http://127.0.0.1:$Port/api/v1/admin/ops/health" -TimeoutSec 5
     Write-Host "OK: backend działa (db=$($r.db))" -ForegroundColor Green
 } catch {
-    Write-Host "Backend nie odpowiada jeszcze - sprawdź $log" -ForegroundColor Yellow
+    Write-Host "Backend nie odpowiada jeszcze - sprawdź $logErr" -ForegroundColor Yellow
 }

@@ -3,10 +3,13 @@ import { config } from './config/index.js';
 import { migrate } from './db/migrate.js';
 import { healthCheck, closePool } from './db/pool.js';
 import { bootstrapAdminIfNeeded } from './services/adminService.js';
+import { migrateLegacySecrets } from './services/secretMigrationService.js';
 
 async function main() {
   console.log(`[d01i] startuje backend (env=${config.env})...`);
   await migrate();
+  // Po migracjach schematu: bezpieczna migracja legacy jawnych sekretow do enc:v1:
+  await migrateLegacySecrets();
   const dbOk = await healthCheck();
   if (!dbOk) throw new Error('Brak polaczenia z PostgreSQL po migracjach.');
   console.log('[d01i] PostgreSQL OK');

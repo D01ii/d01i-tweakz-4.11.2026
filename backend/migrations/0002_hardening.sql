@@ -1,5 +1,4 @@
 -- D01i Tweakz - migracja 0002: twardnienie (audyt)
-BEGIN;
 
 -- B3: limit urzadzen to regula produktu (maks. 2). Najpierw niedestrukcyjnie
 -- obcinamy ewentualne istniejace wartosci > 2, potem dokładamy CHECK.
@@ -11,4 +10,3 @@ ALTER TABLE licenses ADD CONSTRAINT licenses_max_devices_check CHECK (max_device
 -- aktywacja wiaze nowy HWID (kontrolowana procedura), zamiast cichej podmiany.
 ALTER TABLE devices ALTER COLUMN hwid_hash DROP NOT NULL;
 
-COMMIT;

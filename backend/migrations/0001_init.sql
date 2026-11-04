@@ -1,5 +1,4 @@
 -- D01i Tweakz - migracja bazowa
-BEGIN;
 -- gen_random_uuid() jest wbudowany w PostgreSQL >= 13, pgcrypto nie jest wymagane.
 
 -- ============================== ADMINISTRATORZY ==============================
@@ -144,4 +143,3 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_by UUID REFERENCES admins(id)
 );
 
-COMMIT;

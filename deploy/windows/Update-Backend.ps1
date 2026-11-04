@@ -22,7 +22,7 @@ try {
 
     Write-Host "[update] 3/6 Backup kodu i manifestu ($Backup)..."
     New-Item -ItemType Directory -Force -Path $Backup | Out-Null
-    Copy-Item "$InstallDir\src" -Destination $Backup -Recurse -Force
+    Copy-Item "$InstallDir\src", "$InstallDir\migrations" -Destination $Backup -Recurse -Force
     Copy-Item "$InstallDir\package.json", "$InstallDir\package-lock.json" -Destination $Backup -Force -ErrorAction SilentlyContinue
 
     Write-Host "[update] 4/6 Podmiana kodu + npm ci + migracje..."
@@ -55,7 +55,8 @@ try {
         & (Join-Path $PSScriptRoot 'Stop-Backend.ps1') -EnvFile $EnvFile -InstallDir $InstallDir
         if (Test-Path "$Backup\src") {
             Remove-Item "$InstallDir\src" -Recurse -Force -ErrorAction SilentlyContinue
-            Copy-Item "$Backup\src" -Destination $InstallDir -Recurse -Force
+            Remove-Item "$InstallDir\migrations" -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item "$Backup\src", "$Backup\migrations" -Destination $InstallDir -Recurse -Force
             Copy-Item "$Backup\package.json", "$Backup\package-lock.json" -Destination $InstallDir -Force -ErrorAction SilentlyContinue
         }
         Push-Location $InstallDir
