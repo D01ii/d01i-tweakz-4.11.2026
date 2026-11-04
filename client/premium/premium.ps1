@@ -1146,13 +1146,6 @@ function Set-MouseMenuDelay {
     Set-Reg 'HKCU:\Control Panel\Mouse' DoubleClickSpeed 50 String
     Write-Ok 'MenuShowDelay=0, MouseHoverTime=0.'; Add-Applied 'mouse-menu'
 }
-'@ | Set-Content $scriptPath -Encoding UTF8
-    $bat = Join-Path $script:Root 'TRYB_AGRESYWNY.bat'
-    "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`"`r`n" | Set-Content $bat -Encoding ASCII
-    Write-Ok "Skrypt agresywny zapisany: $bat"
-    Write-Info 'Uruchom TRYB_AGRESYWNY.bat przed gra, a po zamknieciu gry explorer sie przywroci.'
-    Add-Applied 'aggressive'
-}
 function Test-NetworkPing {
     Write-Step 'Test pingu i jittera'
     $targets = @(
@@ -1251,7 +1244,6 @@ function Invoke-Undo {
     Restore-ServiceUndo
     Restore-TaskUndo
 
-    }
     try { Unregister-ScheduledTask -TaskName $script:AutoRunTaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Startup')) 'd01i_premium_autorun.bat') -Force -ErrorAction SilentlyContinue
 
