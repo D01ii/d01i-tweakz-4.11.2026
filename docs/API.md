@@ -10,14 +10,16 @@ Aktywacja klucza na urządzeniu. Limit urządzeń egzekwowany serwerowo (transak
 ```json
 { "key": "D01I-XXXX-XXXX-XXXX-XXXX", "install_id": "uuid-instalacji", "hwid": "odcisk-sprzetu", "label": "optional" }
 ```
-Odpowiedzi: `200 {token, token_expires_at, device_id, license}` · `401 KEY_INVALID` · `403 LICENSE_REVOKED|LICENSE_EXPIRED` · `409 DEVICE_LIMIT_REACHED` · `429` (rate limit / blokada)
+Odpowiedzi: `200 {token, token_expires_at, device_id, license}` · `401 KEY_INVALID` · `403 LICENSE_REVOKED|LICENSE_EXPIRED` · `409 DEVICE_LIMIT_REACHED` · `409 HWID_MISMATCH` (zmiana HWID przy tym samym install_id; wymaga resetu urządzenia przez admina) · `429` (rate limit / blokada)
 
 ### POST /license/validate
 `{"token":"..."}` → `200 {valid:true, license, device_id}` lub `401 {valid:false, error}`.
 
 ### POST /license/refresh
-`{"token":"..."}` → `200 {ok, token, token_expires_at}`. Rotacja tokena; idempotentne
-powtórzenie w oknie 60 s zwraca ten sam nowy token (odporność na utratę odpowiedzi).
+`{"token":"..."}` → `200 {ok, token, token_expires_at}`. Rotacja tokena: pierwsze poprawne
+odświeżenie **unieważnia stary token natychmiast** (wszystkie endpointy go odrzucają);
+powtórzenie w oknie 60 s zwraca ten sam nowy token (odporność na utratę odpowiedzi);
+po oknie stary token → `401 TOKEN_ROTATED`.
 
 ### POST /license/deactivate
 `{"token":"..."}` **lub** `{"key":"...","install_id":"..."}` → zwalnia slot urządzenia.
@@ -58,4 +60,4 @@ Wszystkie poniższe wymagają cookie `d01i_admin_session` i nagłówka `X-CSRF-T
 | GET  | /admin/ops/settings | ustawienia (sekrety maskowane) |
 
 Typy licencji: `DEMO` (7 dni), `PREMIUM_30D`, `PREMIUM_90D`, `PREMIUM_LIFETIME`.
-Maksymalnie 2 aktywne urządzenia na licencję (konfigurowalne 1–10 przy tworzeniu).
+Maksymalnie 2 aktywne urządzenia na licencję — reguła produktu egzekwowana w API (1–2), schemacie bazy (CHECK) i logice aktywacji.

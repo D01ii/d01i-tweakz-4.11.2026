@@ -54,12 +54,15 @@
     btn.onclick = async () => {
       errBox.classList.add('hidden');
       try {
+        const mfaVal = document.getElementById('lg-totp').value.trim();
         const r = await api('/api/v1/admin/login', {
           method: 'POST',
           body: {
             username: document.getElementById('lg-user').value,
             password: document.getElementById('lg-pass').value,
-            totp: document.getElementById('lg-totp').value || undefined,
+            // B5: pole MFA przyjmuje kod TOTP (6 cyfr) LUB jednorazowy kod odzyskiwania.
+            totp: /^\d{6}$/.test(mfaVal) ? mfaVal : undefined,
+            recovery_code: mfaVal && !/^\d{6}$/.test(mfaVal) ? mfaVal : undefined,
           },
         });
         csrfToken = r.csrfToken;
@@ -68,7 +71,7 @@
       } catch (e) {
         errBox.textContent = e.message;
         errBox.classList.remove('hidden');
-        if (e.code === 'TOTP_REQUIRED') {
+        if (e.code === 'TOTP_REQUIRED' || e.code === 'MFA_INVALID') {
           document.getElementById('lg-totp-lbl').classList.remove('hidden');
           document.getElementById('lg-totp').classList.remove('hidden');
           document.getElementById('lg-totp').focus();
@@ -168,8 +171,8 @@
         <option value="PREMIUM_90D">PREMIUM 90D</option>
         <option value="PREMIUM_LIFETIME">PREMIUM LIFETIME</option>
       </select>
-      <label>Limit urządzeń</label>
-      <input id="m-dev" type="number" value="2" min="1" max="10">
+      <label>Limit urządzeń (reguła produktu: maks. 2)</label>
+      <select id="m-dev"><option value="2">2</option><option value="1">1</option></select>
       <label>Notatka (opcjonalnie)</label>
       <input id="m-notes">
       <div class="row" style="margin-top:16px"><button id="m-ok">Wygeneruj klucz</button><button class="secondary" id="m-cancel">Anuluj</button></div>
@@ -291,10 +294,14 @@
 
   // ------------------------- SETTINGS -------------------------
   async function renderSettings(c) {
-    const [{ webhook }, { admins }] = await Promise.all([
+    const me = await api('/api/v1/admin/me').catch(() => null);
+    const isSuper = me && me.role === 'superadmin';
+    const [{ webhook }, adminsRes] = await Promise.all([
       api('/api/v1/admin/ops/settings/webhook'),
-      api('/api/v1/admin/admins'),
+      // B6: /admin/admins wymaga roli superadmin - zwykły admin dostałby 403.
+      isSuper ? api('/api/v1/admin/admins') : Promise.resolve(null),
     ]);
+    const admins = adminsRes ? adminsRes.admins : [];
     c.innerHTML = `
       <h2>Ustawienia</h2>
       <div class="panel"><h3>Webhook Discord (alerty bezpieczeństwa)</h3>
@@ -302,9 +309,9 @@
         <label>Włączony: <input id="wh-en" type="checkbox" ${webhook.enabled ? 'checked' : ''} style="width:auto"></label>
         <label>URL webhooka ${webhook.configured ? '(ustawiony)' : ''}</label>
         <input id="wh-url" type="password" placeholder="https://discord.com/api/webhooks/…">
-        <div style="margin-top:10px"><button id="wh-save">Zapisz webhook</button></div>
+        <div style="margin-top:10px">${isSuper ? '<button id="wh-save">Zapisz webhook</button>' : '<span class="muted">Zapis webhooka wymaga roli superadmin.</span>'}</div>
       </div>
-      <div class="panel"><h3>Administratorzy</h3>
+      ${isSuper ? `<div class="panel"><h3>Administratorzy</h3>` : ''}
         <table><tr><th>Użytkownik</th><th>Rola</th><th>MFA</th><th>Status</th><th></th></tr>
         ${admins.map((a) => `<tr><td>${esc(a.username)}</td><td>${esc(a.role)}</td>
           <td>${a.totp_enabled ? 'włączone' : '—'}</td>
@@ -316,8 +323,8 @@
         <label>Hasło (min. 12 znaków)</label><input id="na-pass" type="password">
         <label>Rola</label><select id="na-role"><option value="admin">admin</option><option value="superadmin">superadmin</option></select>
         <div style="margin-top:10px"><button id="na-create">Utwórz administratora</button></div>
-      </div>`;
-    c.querySelector('#wh-save').onclick = async () => {
+      </div>` : '<div class="panel muted">Zarządzanie administratorami i zapis webhooka są dostępne tylko dla superadmina.</div>'};
+    if (c.querySelector('#wh-save')) c.querySelector('#wh-save').onclick = async () => {
       try {
         await api('/api/v1/admin/ops/settings/webhook', { method: 'POST', body: {
           enabled: c.querySelector('#wh-en').checked,
@@ -326,7 +333,7 @@
         toast('Zapisano ustawienia webhooka.');
       } catch (e) { toast(e.message, true); }
     };
-    c.querySelector('#na-create').onclick = async () => {
+    if (c.querySelector('#na-create')) c.querySelector('#na-create').onclick = async () => {
       try {
         await api('/api/v1/admin/admins', { method: 'POST', body: {
           username: c.querySelector('#na-user').value,

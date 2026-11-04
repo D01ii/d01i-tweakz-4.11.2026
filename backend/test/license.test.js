@@ -25,7 +25,7 @@ test('niepoprawny klucz -> 401 KEY_INVALID', async () => {
   assert.equal(r.body.error, 'KEY_INVALID');
 });
 
-test('walidacja tokena dziala, refresh rotuje token', async () => {
+test('walidacja tokena dziala, refresh rotuje token i UNIEWAŻNIA stary (B1)', async () => {
   const lic = await createTestLicense(t.query);
   const act = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
   const token = act.body.token;
@@ -41,13 +41,70 @@ test('walidacja tokena dziala, refresh rotuje token', async () => {
   const rj = await rf.json();
   assert.ok(rj.token && rj.token !== token);
 
-  // stary token po rotacji: sesja zastapiona ale nie revoked -> validate nadal OK do exp, refresh idempotentny
+  // B1: stary token po rotacji NIE może być użyty do walidacji (revoked natychmiast)
+  const vOld = await t.client('/api/v1/license/validate', { method: 'POST', body: JSON.stringify({ token }) });
+  assert.equal(vOld.status, 401);
+  assert.equal((await vOld.json()).error, 'SESSION_REVOKED');
+
+  // idempotentny replay: powtorzony refresh w oknie zwraca TEN SAM nowy token
   const rf2 = await t.client('/api/v1/license/refresh', { method: 'POST', body: JSON.stringify({ token }) });
+  assert.equal(rf2.status, 200);
   const rj2 = await rf2.json();
   assert.equal(rj2.token, rj.token, 'powtorzony refresh po utracie odpowiedzi zwraca ten sam token (idempotentnosc)');
 
+  // nowy token działa
   const v2 = await t.client('/api/v1/license/validate', { method: 'POST', body: JSON.stringify({ token: rj.token }) });
   assert.equal((await v2.json()).valid, true);
+});
+
+test('rownolegle odswiezenia jednego tokena tworza dokladnie jeden nastepce (B1)', async () => {
+  const lic = await createTestLicense(t.query);
+  const act = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  const token = act.body.token;
+  const results = await Promise.all(
+    Array.from({ length: 6 }, () => t.client('/api/v1/license/refresh', { method: 'POST', body: JSON.stringify({ token }) }))
+  );
+  const bodies = await Promise.all(results.map((r) => r.json()));
+  assert.ok(results.every((r) => r.status === 200));
+  const tokens = new Set(bodies.map((b) => b.token));
+  assert.equal(tokens.size, 1, 'wszystkie równoczesne odswiezenia musza dostac ten sam token');
+  const active = await t.query(
+    `SELECT COUNT(*)::int AS n FROM license_sessions WHERE device_id = $1 AND NOT revoked`,
+    [act.body.device_id]
+  );
+  assert.equal(active.rows[0].n, 1, 'dokladnie jedna aktywna sesja na urzadzenie');
+});
+
+test('zmiana HWID przy tym samym install_id jest odrzucana (B2)', async () => {
+  const lic = await createTestLicense(t.query);
+  const a = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  assert.equal(a.status, 200);
+  // "sklonowany" install_id z innym HWID -> odmowa
+  const evil = await activateKey(t.client, lic.key, INSTALL_A, 'hwid-attacker-clone-99');
+  assert.equal(evil.status, 409);
+  assert.equal(evil.body.error, 'HWID_MISMATCH');
+  const ev = await t.query(`SELECT kind FROM abuse_events WHERE kind='DEVICE_HWID_MISMATCH' ORDER BY at DESC LIMIT 1`);
+  assert.equal(ev.rows[0].kind, 'DEVICE_HWID_MISMATCH');
+  // oryginalny HWID nadal dziala
+  const ok = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  assert.equal(ok.status, 200);
+});
+
+test('po resecie urzadzen przez admina mozna ponownie zwiazac HWID (B2)', async () => {
+  const { adminLogin, authedClient } = await import('./helpers.js');
+  const { cookieHeader, csrfToken } = await adminLogin(t.client, t.query);
+  const api = authedClient(t.client, cookieHeader, csrfToken);
+  const lic = await createTestLicense(t.query);
+  await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  // admin resetuje urzadzenia
+  const rs = await api(`/api/v1/admin/licenses/${lic.id}/reset-devices`, { method: 'POST' });
+  assert.equal(rs.status, 200);
+  // hwid_hash wyczyszczony
+  const d = await t.query(`SELECT hwid_hash FROM devices WHERE license_id=$1`, [lic.id]);
+  assert.equal(d.rows[0].hwid_hash, null);
+  // ponowna aktywacja z nowym HWID przechodzi (kontrolowane ponowne zwiazanie)
+  const re = await activateKey(t.client, lic.key, INSTALL_A, 'hwid-new-hardware-01');
+  assert.equal(re.status, 200);
 });
 
 test('limit urzadzen: 2 aktywne OK, trzecie odrzucone (409)', async () => {

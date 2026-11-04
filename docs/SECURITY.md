@@ -35,3 +35,27 @@ nie wyłącznie kod. Kod implementuje środki techniczne; dokumenty prawne leż�
 ## Oświadczenie o kliencie
 Klient PowerShell **można zmodyfikować** (użytkownik ma kontrolę nad komputerem).
 Dlatego autoryzacja PREMIUM zawsze pochodzi z backendu; klient nie jest źródłem prawdy.
+
+## Decyzje z audytu (2026-11-04)
+
+- **Sekrety w bazie (B4):** sekret TOTP i URL webhooka Discord są szyfrowane w spoczynku
+  AES-256-GCM (`enc:v1:…`), klucz `SECRET_ENC_KEY` (32 bajty) tylko w env/poza bazą.
+  Stare wartości plaintext są czytane legacy tylko do migracji. Hasła adminów: Argon2id (hash, bez odczytu).
+- **Rotacja tokenów (B1):** stary token jest unieważniany atomowo przy pierwszym refresh
+  (`revoked, reason='rotated'`); replay w oknie 60 s zwraca ten sam następca; równoczesne
+  odświeżenia serializuje `FOR UPDATE` (dokładnie jeden następca). Po oknie → `TOKEN_ROTATED`.
+- **HWID (B2):** brak cichej podmiany — niezgodność HWID przy istniejącym install_id →
+  `409 HWID_MISMATCH` + zdarzenie `DEVICE_HWID_MISMATCH` + audit. Zmiana sprzętu = reset
+  urządzenia przez admina (czyści `hwid_hash`), potem kontrolowane ponowne związanie.
+- **Limit urządzeń (B3):** maks. 2 jako reguła produktu — API (1–2), CHECK w schemacie,
+  migracja 0002 obcina ewentualne istniejące wartości >2 niedestrukcyjnie.
+- **Rate limiting (B8):** w pamięci procesu — wystarczające przy jednym VPS/jednej
+  instancji (udokumentowana architektura); liczniki nieudanych logowań dodatkowo w DB
+  (blokada konta). Przy wielu instancjach można dodać Redis bez zmiany API.
+- **Trust proxy (D3):** aplikacja binduje `127.0.0.1`; w produkcji `trust proxy=1`,
+  a Caddy **nadpisuje** `X-Forwarded-For` własną wartością (`header_up`), więc klient
+  nie może sfabrykować IP. Bezpośredni dostęp z zewnątrz jest niemożliwy (UFW + bind).
+- **Discord (D4):** tylko zdarzenia i pola zminimalizowane (skrócony hash IP, brak pełnych
+  kluczy/tokenów/HWID); webhook wyłączalny w panelu; URL zaszyfrowany w bazie i maskowany w API.
+- **TTL tokenów (D1):** 120 s (zakres dozwolony 30–120, poza zakresem backend odmawia startu).
+  Uzasadnienie: klient odświeża co ~60 s, więc 120 s daje margines na 1 utraconą odpowiedź.

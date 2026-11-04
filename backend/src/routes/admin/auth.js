@@ -90,7 +90,11 @@ router.post('/mfa/enable', requireAdmin, adminApiLimiter, async (req, res, next)
 
 router.post('/mfa/disable', requireAdmin, adminApiLimiter, async (req, res, next) => {
   try {
-    await disableTotp(req.admin.adminId, String(req.body?.password || ''));
+    await disableTotp(req.admin.adminId, {
+      password: String(req.body?.password || ''),
+      totp: req.body?.totp ? String(req.body.totp) : null,
+      recoveryCode: req.body?.recovery_code ? String(req.body.recovery_code) : null,
+    });
     res.json({ ok: true });
   } catch (e) { next(e.status ? e : httpError(400, 'MFA_ERROR', e.message)); }
 });

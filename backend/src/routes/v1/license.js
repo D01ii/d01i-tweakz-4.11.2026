@@ -45,6 +45,7 @@ router.post('/activate', activateLimiter, validateBody(activateSchema), async (r
         LICENSE_REVOKED: [403, 'Licencja zostala uniewazniona.'],
         LICENSE_EXPIRED: [403, 'Licencja wygasla.'],
         DEVICE_LIMIT_REACHED: [409, `Osiagnieto limit aktywnych urzadzen (${r.maxDevices}). Dezaktywuj jedno z nich.`],
+        HWID_MISMATCH: [409, r.message || 'Identyfikator sprzetu nie zgadza sie z zapisanym dla tej instalacji.'],
         KEY_REQUIRED: [400, 'Brak klucza.'],
         INSTALL_ID_INVALID: [400, 'Nieprawidlowy identyfikator instalacji.'],
         HWID_INVALID: [400, 'Nieprawidlowy identyfikator sprzetu.'],

@@ -13,8 +13,18 @@ export async function logAudit({ actorType = 'system', actorId = null, action, t
     );
   } catch (err) {
     // Audit log nie moze przerwac operacji, ale blad musi byc widoczny.
+    // Krytyczne operacje używają logAuditTx (zapis w tej samej transakcji).
     console.error('[audit] nie udalo sie zapisac wpisu:', err.message);
   }
+}
+
+/** B7: zapis audytowy wewnątrz transakcji biznesowej - albo oba się udadzą, albo żaden. */
+export async function logAuditTx(client, { actorType = 'system', actorId = null, action, target = null, ipHash = null, severity = 'info', meta = null }) {
+  await client.query(
+    `INSERT INTO audit_logs (actor_type, actor_id, action, target, ip_hash, severity, meta)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [actorType, actorId, action, target, ipHash, severity, meta ? JSON.stringify(meta) : null]
+  );
 }
 
 export async function listAudit({ limit = 100, offset = 0, action = null } = {}) {

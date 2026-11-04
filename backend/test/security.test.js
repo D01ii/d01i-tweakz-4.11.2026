@@ -94,3 +94,32 @@ test('nieznana trasa API -> 404 JSON', async () => {
   assert.equal(r.status, 404);
   assert.equal((await r.json()).error, 'NOT_FOUND');
 });
+
+test('replay rotowanego tokena tylko w oknie idempotencji (B1, osobny proces)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const out = execFileSync(process.execPath, ['test/refresh-window-child.mjs'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env, ARGON2_MEMORY_COST: '19456' },
+    encoding: 'utf8',
+    timeout: 60000,
+  });
+  assert.match(out, /FIRST=200/);
+  assert.match(out, /REPLAY_IN_WINDOW=200 same=true/);
+  assert.match(out, /REPLAY_AFTER_WINDOW=401 error=TOKEN_ROTATED/);
+});
+
+test('konfiguracja: TOKEN_TTL_SECONDS poza zakresem 30-120 odmawia startu (D1)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  let err = null;
+  try {
+    execFileSync(process.execPath, ['-e', "process.env.DATABASE_URL='postgresql://postgres@/d01i_test_security?host=/tmp/d01i-pgdata';process.env.SECURITY_PEPPER='x';process.env.SECRET_ENC_KEY='a'.repeat(64);process.env.ALLOW_EPHEMERAL_KEYS='true';process.env.TOKEN_TTL_SECONDS='9999';import('./src/config/index.js')"], {
+      cwd: new URL('..', import.meta.url).pathname,
+      env: { ...process.env },
+      encoding: 'utf8',
+      timeout: 30000,
+      stdio: 'pipe',
+    });
+  } catch (e) { err = e; }
+  assert.ok(err, 'start z TTL=9999 musi sie nie powiesc');
+  assert.match(String(err.stderr || err.message), /TOKEN_TTL_SECONDS/);
+});

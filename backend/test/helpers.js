@@ -23,6 +23,7 @@ export function testEnv(overrides = {}) {
     NODE_ENV: 'test',
     DATABASE_URL: testDbUrl(),
     SECURITY_PEPPER: 'test-pepper',
+    SECRET_ENC_KEY: 'a'.repeat(64), // 32 bajty hex dla testow
     ED25519_PRIVATE_KEY_PATH: privPath,
     ED25519_PUBLIC_KEY_PATH: pubPath,
     PORT: '0',

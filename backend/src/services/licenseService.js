@@ -3,7 +3,7 @@ import { config } from '../config/index.js';
 import { keyHash, licenseDurationDays } from '../utils/licenseKey.js';
 import { pepperedHash, randomUuid } from '../utils/crypto.js';
 import { issueSession, verifySessionToken, refreshSession, revokeAllSessions } from './tokenService.js';
-import { logAudit } from './auditService.js';
+import { logAudit, logAuditTx } from './auditService.js';
 import { recordAbuse, maybeEscalateFailedKeys } from './abuseService.js';
 
 function publicLicense(row) {
@@ -55,19 +55,41 @@ export async function activate({ key, installId, hwid, label = null, ipHash = nu
     let device;
     if (devR.rows.length) {
       device = devR.rows[0];
+      // B2: HWID istniejacego urzadzenia NIE może być cicho podmieniony.
+      // Zmiana sprzetu wymaga resetu urzadzenia przez admina (reset czyści hwid_hash).
+      if (device.hwid_hash && device.hwid_hash !== hwidHash) {
+        await recordAbuse({
+          kind: 'DEVICE_HWID_MISMATCH',
+          severity: 'high',
+          ipHash,
+          keyHash: kh,
+          installId: instId,
+          meta: { license_id: lic.id, device_id: device.id, active: device.active },
+        });
+        await logAuditTx(client, {
+          actorType: 'client', action: 'license.activate.hwid_mismatch', target: lic.id,
+          ipHash, severity: 'warning', meta: { device_id: device.id, install_id: instId },
+        });
+        return { ok: false, code: 'HWID_MISMATCH' };
+      }
       if (!device.active) {
+        // Reaktywacja: hwid_hash NULL (po resecie admina) -> wiażemy nowy HWID (kontrolowanie).
         await client.query(
-          `UPDATE devices SET active = TRUE, deactivated_at = NULL, hwid_hash = $2, last_seen_at = now() WHERE id = $1`,
+          `UPDATE devices SET active = TRUE, deactivated_at = NULL, hwid_hash = COALESCE(hwid_hash, $2), last_seen_at = now() WHERE id = $1`,
           [device.id, hwidHash]
         );
         device.active = true;
         await client.query(
           `INSERT INTO activation_history (license_id, device_id, action, ip_hash, user_agent, meta)
            VALUES ($1,$2,'REACTIVATE',$3,$4,$5)`,
-          [lic.id, device.id, ipHash, userAgent, JSON.stringify({ hwid_changed: device.hwid_hash !== hwidHash })]
+          [lic.id, device.id, ipHash, userAgent, JSON.stringify({ hwid_rebound: device.hwid_hash === null })]
         );
+        await logAuditTx(client, {
+          actorType: 'client', action: 'license.reactivate.ok', target: lic.id,
+          ipHash, severity: 'info', meta: { device_id: device.id, hwid_rebound: device.hwid_hash === null },
+        });
       } else {
-        await client.query(`UPDATE devices SET last_seen_at = now(), hwid_hash = $2 WHERE id = $1`, [device.id, hwidHash]);
+        await client.query(`UPDATE devices SET last_seen_at = now() WHERE id = $1`, [device.id]);
       }
     } else {
       const activeCount = await client.query(
@@ -76,11 +98,15 @@ export async function activate({ key, installId, hwid, label = null, ipHash = nu
       );
       if (activeCount.rows[0].n >= lic.max_devices) {
         await recordAbuse({ kind: 'DEVICE_LIMIT_HIT', severity: 'medium', ipHash, keyHash: kh, installId: instId, meta: { license_id: lic.id, active: activeCount.rows[0].n, max: lic.max_devices } });
-        await client.query(
-          `INSERT INTO activation_history (license_id, action, ip_hash, user_agent, meta)
-           VALUES ($1,'ACTIVATE',$2,$3,$4)`,
+      await client.query(
+        `INSERT INTO activation_history (license_id, action, ip_hash, user_agent, meta)
+         VALUES ($1,'ACTIVATE',$2,$3,$4)`,
           [lic.id, ipHash, userAgent, JSON.stringify({ result: 'device_limit', install_id: instId })]
         );
+        await logAuditTx(client, {
+          actorType: 'client', action: 'license.activate.device_limit', target: lic.id,
+          ipHash, severity: 'info', meta: { install_id: instId, max: lic.max_devices },
+        });
         return { ok: false, code: 'DEVICE_LIMIT_REACHED', maxDevices: lic.max_devices };
       }
       const newId = randomUuid();
@@ -103,7 +129,7 @@ export async function activate({ key, installId, hwid, label = null, ipHash = nu
        WHERE device_id = $1 AND NOT revoked`,
       [device.id]
     );
-    await logAudit({ actorType: 'client', action: 'license.activate.ok', target: lic.id, ipHash, meta: { device_id: device.id, type: lic.type } });
+    await logAuditTx(client, { actorType: 'client', action: 'license.activate.ok', target: lic.id, ipHash, severity: 'info', meta: { device_id: device.id, type: lic.type } });
 
     // Sesje wydajemy poza blokujacym lockiem? Nie - wydajemy w tej samej transakcji, zeby byla atomowa.
     const jti = randomUuid();
@@ -173,8 +199,8 @@ export async function deactivate({ token = null, key = null, installId = null, i
       `INSERT INTO activation_history (license_id, device_id, action, ip_hash) VALUES ($1,$2,'DEACTIVATE',$3)`,
       [licenseId, deviceId, ipHash]
     );
+    await logAuditTx(client, { actorType: 'client', action: 'license.deactivate.ok', target: licenseId, ipHash, severity: 'info', meta: { device_id: deviceId } });
   });
-  await logAudit({ actorType: 'client', action: 'license.deactivate.ok', target: licenseId, ipHash, meta: { device_id: deviceId } });
   return { ok: true };
 }
 

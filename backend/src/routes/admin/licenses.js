@@ -5,15 +5,14 @@ import { generateLicenseKey, keyHash, keyPrefix, isValidKeyFormat, LICENSE_TYPES
 import { requireAdmin } from '../../middleware/adminAuth.js';
 import { adminApiLimiter } from '../../middleware/rateLimit.js';
 import { httpError } from '../../middleware/common.js';
-import { logAudit } from '../../services/auditService.js';
-import { revokeAllSessions } from '../../services/tokenService.js';
+import { logAudit, logAuditTx } from '../../services/auditService.js';
 import { sendDiscordAlert } from '../../services/discordService.js';
 
 const router = Router();
 
 const createSchema = z.object({
   type: z.enum(LICENSE_TYPES),
-  max_devices: z.number().int().min(1).max(10).default(2),
+  max_devices: z.number().int().min(1).max(2).default(2),
   notes: z.string().max(500).optional(),
   expires_at: z.string().datetime().optional(), // opcjonalnie inna data niz domyslna dla typu
 });
@@ -81,13 +80,22 @@ router.get('/:id', requireAdmin, async (req, res, next) => {
 router.post('/:id/revoke', requireAdmin, adminApiLimiter, async (req, res, next) => {
   try {
     const reason = String(req.body?.reason || '').slice(0, 300) || 'brak';
-    const r = await query(
-      `UPDATE licenses SET status = 'REVOKED', revoked_at = now(), revoke_reason = $2 WHERE id = $1 AND status = 'ACTIVE' RETURNING id`,
-      [req.params.id, reason]
-    );
-    if (!r.rows.length) throw httpError(404, 'NOT_FOUND', 'Licencja nie istnieje lub jest juz uniewazniona.');
-    await revokeAllSessions(req.params.id, 'license_revoked_by_admin');
-    await logAudit({ actorType: 'admin', actorId: req.admin.adminId, action: 'license.revoke', target: req.params.id, severity: 'critical', meta: { reason } });
+    // B7: revoke + uniewaznienie sesji + audit w JEDNEJ transakcji.
+    const revoked = await withTransaction(async (client) => {
+      const r = await client.query(
+        `UPDATE licenses SET status = 'REVOKED', revoked_at = now(), revoke_reason = $2 WHERE id = $1 AND status = 'ACTIVE' RETURNING id`,
+        [req.params.id, reason]
+      );
+      if (!r.rows.length) return false;
+      await client.query(
+        `UPDATE license_sessions SET revoked = TRUE, revoked_at = now(), revoke_reason = 'license_revoked_by_admin'
+         WHERE license_id = $1 AND NOT revoked`,
+        [req.params.id]
+      );
+      await logAuditTx(client, { actorType: 'admin', actorId: req.admin.adminId, action: 'license.revoke', target: req.params.id, severity: 'critical', meta: { reason } });
+      return true;
+    });
+    if (!revoked) throw httpError(404, 'NOT_FOUND', 'Licencja nie istnieje lub jest juz uniewazniona.');
     await sendDiscordAlert({ title: 'Uniewazniono licencje', severity: 'high', fields: { licencja: req.params.id.slice(0, 8) + '…', powod: reason } });
     res.json({ ok: true });
   } catch (e) { next(e); }
@@ -111,13 +119,14 @@ router.post('/:id/reset-devices', requireAdmin, adminApiLimiter, async (req, res
     await withTransaction(async (client) => {
       const lic = await client.query(`SELECT id FROM licenses WHERE id = $1 FOR UPDATE`, [req.params.id]);
       if (!lic.rows.length) throw httpError(404, 'NOT_FOUND', 'Nie znaleziono licencji.');
-      await client.query(`UPDATE devices SET active = FALSE, deactivated_at = now() WHERE license_id = $1`, [req.params.id]);
+      // B2: reset czyści też hwid_hash - kolejna aktywacja wiąże HWID od nowa (kontrolowanie).
+      await client.query(`UPDATE devices SET active = FALSE, deactivated_at = now(), hwid_hash = NULL WHERE license_id = $1`, [req.params.id]);
       await client.query(
         `UPDATE license_sessions SET revoked = TRUE, revoked_at = now(), revoke_reason = 'devices_reset_by_admin' WHERE license_id = $1 AND NOT revoked`,
         [req.params.id]
       );
+      await logAuditTx(client, { actorType: 'admin', actorId: req.admin.adminId, action: 'license.reset_devices', target: req.params.id, severity: 'warning' });
     });
-    await logAudit({ actorType: 'admin', actorId: req.admin.adminId, action: 'license.reset_devices', target: req.params.id, severity: 'warning' });
     res.json({ ok: true });
   } catch (e) { next(e); }
 });

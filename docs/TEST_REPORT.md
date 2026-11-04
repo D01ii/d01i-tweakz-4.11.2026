@@ -1,15 +1,17 @@
 # Raport testów — D01i Tweakz Backend (wydanie 1.0.0)
 
-**Data uruchomienia:** 2026-11-04 · **Środowisko:** Node.js v22.22.3, PostgreSQL (instancja testowa), Debian sandbox
+**Data uruchomienia:** 2026-11-04 (po audycie) · **Środowisko:** Node.js v22.22.3, PostgreSQL (instancja testowa), Debian sandbox
 **Polecenie:** `node --test --test-concurrency=1 "test/*.test.js"` (w `backend/`)
 
-## Wynik: 29 / 29 PASS, 0 FAIL
+## Wynik: 39 / 39 PASS, 0 FAIL
 
 ```
-# tests 29
-# pass 29
+# tests 39
+# pass 39
 # fail 0
 ```
+
+Nowe testy regresyjne z audytu: stary token po rotacji → 401; 6 równoczesnych refreshów → dokładnie 1 nowy token; replay po oknie idempotencji → 401 TOKEN_ROTATED (osobny proces); HWID mismatch → 409 + zdarzenie; reset admina czyści HWID i pozwala na ponowne związanie; API odrzuca max_devices>2; sekrety TOTP/webhook zaszyfrowane w bazie; recovery code jednorazowy; wyłączenie MFA wymaga hasła+TOTP; zwykły admin → 403 na /admin/admins; TOKEN_TTL_SECONDS poza 30–120 → odmowa startu.
 
 ## Lista testów (wszystkie wykonane realnie, wszystkie zielone)
 

@@ -81,6 +81,16 @@ configure_postgres() {
   su - postgres -c "psql -c \"ALTER ROLE ${DB_USER} NOSUPERUSER NOCREATEDB NOCREATEROLE;\"" || true
 }
 
+ensure_config_dirs() {
+  # A1: /etc/d01i-tweakz musi istnieć przed pierwszym zapisem sekretu (.db_password w configure_postgres).
+  if [ ! -d "/etc/${APP_NAME}" ]; then
+    install -d -m 700 -o root -g root "/etc/${APP_NAME}"
+    log "Utworzono /etc/${APP_NAME} (700, root:root)."
+  fi
+  install -d -m 700 -o root -g root "/etc/${APP_NAME}/keys" 2>/dev/null || true
+  mkdir -p "${LOG_DIR}" && chown "${APP_USER}:${APP_USER}" "${LOG_DIR}" 2>/dev/null || true
+}
+
 create_app_user() {
   if ! id "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --home "${APP_DIR}" --shell /usr/sbin/nologin "${APP_USER}"
@@ -101,15 +111,15 @@ deploy_app() {
 }
 
 generate_secrets_and_keys() {
-  mkdir -p "/etc/${APP_NAME}" "${KEYS_DIR}" "${LOG_DIR}"
-  chmod 700 "/etc/${APP_NAME}" "${KEYS_DIR}"
+  install -d -m 700 -o root -g root "/etc/${APP_NAME}" "${KEYS_DIR}"
+  mkdir -p "${LOG_DIR}"
 
   if [ ! -f "${KEYS_DIR}/ed25519_private.pem" ]; then
     log "Generowanie pary kluczy Ed25519..."
     openssl genpkey -algorithm ed25519 -out "${KEYS_DIR}/ed25519_private.pem"
     openssl pkey -in "${KEYS_DIR}/ed25519_private.pem" -pubout -out "${KEYS_DIR}/ed25519_public.pem"
   fi
-  chmod 600 "${KEYS_DIR}/ed25519_private.pem"
+  chmod 640 "${KEYS_DIR}/ed25519_private.pem"  # czytelny dla grupy d01i (usluga), nie dla innych
   chmod 644 "${KEYS_DIR}/ed25519_public.pem"
 
   PEPPER="$(openssl rand -hex 32)"
@@ -136,8 +146,11 @@ EOF
   else
     log "Plik ${ENV_FILE} już istnieje - pozostawiam bez zmian."
   fi
-  chown -R "${APP_USER}:${APP_USER}" "/etc/${APP_NAME}"
-  chmod 600 "${ENV_FILE}"
+  # Klucze i .env czyta tylko aplikacja; katalog zostaje root, pliki root:${APP_USER} 640/600.
+  chown -R "root:${APP_USER}" "/etc/${APP_NAME}"
+  chmod 640 "${ENV_FILE}" "/etc/${APP_NAME}/.db_password" 2>/dev/null || true
+  chmod 640 "${KEYS_DIR}/ed25519_private.pem"  # czytelny dla grupy d01i (usluga), nie dla innych
+  chmod 644 "${KEYS_DIR}/ed25519_public.pem"
   chown -R "${APP_USER}:${APP_USER}" "${LOG_DIR}"
 }
 
@@ -211,6 +224,7 @@ main() {
   detect_ubuntu
   install_packages
   create_app_user
+  ensure_config_dirs
   configure_postgres
   deploy_app
   generate_secrets_and_keys

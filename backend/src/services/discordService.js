@@ -1,5 +1,6 @@
 import { config } from '../config/index.js';
 import { query } from '../db/pool.js';
+import { decryptSecret } from '../utils/secretCrypto.js';
 
 /**
  * Opcjonalny kanal alertow Discord.
@@ -12,7 +13,12 @@ import { query } from '../db/pool.js';
 async function getWebhookConfig() {
   try {
     const r = await query(`SELECT value FROM settings WHERE key = 'discord_webhook'`);
-    if (r.rows.length) return r.rows[0].value;
+    if (r.rows.length) {
+      const v = r.rows[0].value;
+      // B4: URL webhooka może być zapisany zaszyfrowanie (enc:v1:...); odszyfrowujemy tylko do użycia.
+      if (v && v.url) return { ...v, url: decryptSecret(v.url) };
+      return v;
+    }
   } catch {
     /* tabela moze nie istniec przed migracja */
   }

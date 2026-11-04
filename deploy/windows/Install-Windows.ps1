@@ -21,6 +21,15 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+
+function New-SecureRandomString([int]$Length = 32) {
+    # Kryptograficznie bezpieczny generator (CSPRNG), niezalezny od openssl.
+    $bytes = New-Object byte[] $Length
+    $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return ([BitConverter.ToString($bytes)).Replace('-', '').ToLowerInvariant()
+}
+
 function Write-Info($m) { Write-Host "[install] $m" -ForegroundColor Cyan }
 function Write-Warn2($m) { Write-Host "[install][UWAGA] $m" -ForegroundColor Yellow }
 function Write-Err2($m) { Write-Host "[install][BŁĄD] $m" -ForegroundColor Red }
@@ -107,14 +116,14 @@ function Configure-Database {
     $exists = Invoke-Psql "SELECT 1 FROM pg_roles WHERE rolname='$DbUser'"
     $dbPassFile = "$env:ProgramData\D01iTweakz\.db_password"
     if ($exists -ne '1') {
-        $dbPass = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+        $dbPass = New-SecureRandomString 48
         Invoke-Psql "CREATE ROLE $DbUser LOGIN PASSWORD '$dbPass' NOSUPERUSER NOCREATEDB NOCREATEROLE" | Out-Null
         $dbPass | Out-File -FilePath $dbPassFile -Encoding ascii -NoNewline
         Write-Info "Utworzono użytkownika bazy $DbUser."
     } else {
         Write-Info "Użytkownik bazy już istnieje."
         $dbPass = Get-Content $dbPassFile -ErrorAction SilentlyContinue
-        if (-not $dbPass) { $dbPass = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ }); Invoke-Psql "ALTER ROLE $DbUser PASSWORD '$dbPass'" | Out-Null; $dbPass | Out-File $dbPassFile -Encoding ascii -NoNewline }
+        if (-not $dbPass) { $dbPass = New-SecureRandomString 48; Invoke-Psql "ALTER ROLE $DbUser PASSWORD '$dbPass'" | Out-Null; $dbPass | Out-File $dbPassFile -Encoding ascii -NoNewline }
     }
     $dbExists = Invoke-Psql "SELECT 1 FROM pg_database WHERE datname='$DbName'"
     if ($dbExists -ne '1') {
@@ -127,18 +136,17 @@ function Configure-Database {
 }
 
 function New-SecretsAndKeys($dbPass) {
-    New-Item -ItemType Directory -Force -Path (Split-Path $EnvFile), $KeysDir | Out-Null
+    New-Item -ItemType Directory -Force -Path (Split-Path $EnvFile), $KeysDir | Out-Null  # A2: idempotentnie, nawet jesli main juz utworzyl
     if (-not (Test-Path "$KeysDir\ed25519_private.pem")) {
-        Write-Info "Generowanie kluczy Ed25519..."
-        $tmp = "$env:TEMP\d01i-key"
-        & openssl genpkey -algorithm ed25519 -out "$tmp-priv.pem" 2>$null
-        & openssl pkey -in "$tmp-priv.pem" -pubout -out "$KeysDir\ed25519_public.pem" 2>$null
-        Move-Item "$tmp-priv.pem" "$KeysDir\ed25519_private.pem" -Force
-        Remove-Item "$tmp-priv.pem" -ErrorAction SilentlyContinue
+        Write-Info "Generowanie kluczy Ed25519 przez Node.js crypto (bez openssl)..."
+        # A4: czysty Windows 11 nie gwarantuje openssl w PATH - uzywamy wbudowanego crypto Node.
+        $keyScript = "const{ generateKeyPairSync }=require('crypto');const fs=require('fs');const{ privateKey, publicKey }=generateKeyPairSync('ed25519');fs.writeFileSync(process.argv[1], privateKey.export({ type: 'pkcs8', format: 'pem' }));fs.writeFileSync(process.argv[2], publicKey.export({ type: 'spki', format: 'pem' }));"
+        & node -e $keyScript "$KeysDir\ed25519_private.pem" "$KeysDir\ed25519_public.pem"
+        if (-not (Test-Path "$KeysDir\ed25519_private.pem")) { throw "Generowanie kluczy Ed25519 nieudane." }
     }
     if (-not (Test-Path $EnvFile)) {
-        $pepper = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 64 | ForEach-Object { [char]$_ })
-        $bootstrapPass = -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+        $pepper = New-SecureRandomString 64
+        $bootstrapPass = New-SecureRandomString 32
         @"
 NODE_ENV=development
 PORT=$Port
@@ -184,6 +192,11 @@ function Test-Health {
 
 # ----------------------------- main -----------------------------
 if (-not (Test-Admin)) { Write-Err2 "Uruchom PowerShell jako Administrator."; exit 1 }
+
+# A2: katalog danych aplikacji musi istnieć przed pierwszym zapisem sekretu (.db_password).
+New-Item -ItemType Directory -Force -Path "$env:ProgramData\D01iTweakz", $KeysDir | Out-Null
+Write-Info "Katalog danych: $env:ProgramData\D01iTweakz"
+
 $v = Get-WindowsVersionInfo
 Write-Info "Windows: $($v.Caption) (build $($v.Build))"
 if (-not (Test-Windows11)) { Write-Warn2 "Wykryto inny system niż Windows 11 - kontynuuję mimo to." }
@@ -207,7 +220,8 @@ Install-DependenciesAndMigrate
 
 if (-not $NoService) {
     Write-Info "Start backendu..."
-    Start-Backend -InstallDir $InstallDir -EnvFile $EnvFile -Port $Port
+    # A3: Start-Backend.ps1 to osobny plik - wywolanie przez operator &, z parametrami.
+    & (Join-Path $PSScriptRoot 'Start-Backend.ps1') -InstallDir $InstallDir -EnvFile $EnvFile -Port $Port
 }
 
 if (Test-Health) {

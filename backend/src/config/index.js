@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -58,7 +58,14 @@ export const config = {
       if (bool(process.env.ALLOW_EPHEMERAL_KEYS, false)) return 'dev-only-pepper-not-for-production';
       throw new Error('Brak SECURITY_PEPPER. Wygeneruj: openssl rand -hex 32');
     })(),
-    tokenTtlSeconds: int(process.env.TOKEN_TTL_SECONDS, 120), // max 120s zgodnie ze specyfikacja
+    tokenTtlSeconds: (() => {
+      // D1: TTL tokena walidujemy przy starcie - cichy clamp byłby niebezpieczny.
+      const ttl = int(process.env.TOKEN_TTL_SECONDS, 120);
+      if (ttl < 30 || ttl > 120) {
+        throw new Error(`TOKEN_TTL_SECONDS=${ttl} poza dozwolonym zakresem 30-120 s. Ustaw poprawna wartosc.`);
+      }
+      return ttl;
+    })(),
     refreshReplayWindowSeconds: int(process.env.REFRESH_REPLAY_WINDOW_SECONDS, 60),
     adminSessionTtlHours: int(process.env.ADMIN_SESSION_TTL_HOURS, 8),
     maxDevicesDefault: int(process.env.MAX_DEVICES_DEFAULT, 2),
@@ -85,6 +92,13 @@ export const config = {
   discord: {
     enabled: bool(process.env.DISCORD_WEBHOOK_ENABLED, false),
     url: process.env.DISCORD_WEBHOOK_URL || '',
+  },
+  secrets: {
+    // B4: klucz szyfrowania sekretow w bazie (TOTP, webhook). Wymagany w produkcji.
+    encKey: process.env.SECRET_ENC_KEY || (() => {
+      if (bool(process.env.ALLOW_EPHEMERAL_KEYS, false)) return randomBytes(32).toString('hex');
+      throw new Error('Brak SECRET_ENC_KEY. Wygeneruj: openssl rand -hex 32');
+    })(),
   },
   keys: loadEd25519Keys(),
   isProduction: (process.env.NODE_ENV || 'development') === 'production',

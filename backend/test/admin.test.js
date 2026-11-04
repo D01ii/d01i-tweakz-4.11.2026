@@ -142,3 +142,77 @@ test('ustawienia webhooka: zapis i maskowanie URL', async () => {
   const aj = await all.json();
   assert.ok(!JSON.stringify(aj).includes('abc'));
 });
+
+test('limit urzadzen > 2 jest odrzucany przez API (B3 - regula produktu)', async () => {
+  const { cookieHeader, csrfToken } = await adminLogin(t.client, t.query);
+  const api = authedClient(t.client, cookieHeader, csrfToken);
+  const r = await api('/api/v1/admin/licenses', { method: 'POST', body: JSON.stringify({ type: 'PREMIUM_30D', max_devices: 5 }) });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'VALIDATION_ERROR');
+  const ok = await api('/api/v1/admin/licenses', { method: 'POST', body: JSON.stringify({ type: 'PREMIUM_30D', max_devices: 2 }) });
+  assert.equal(ok.status, 201);
+});
+
+test('sekret TOTP i URL webhooka sa szyfrowane w bazie (B4)', async () => {
+  const { createAdmin, setupTotp } = await import('../src/services/adminService.js');
+  await createAdmin({ username: 'encadmin', password: 'super-secret-password-123' });
+  const id = (await t.query(`SELECT id FROM admins WHERE username='encadmin'`)).rows[0].id;
+  const { secret } = await setupTotp(id);
+  const row = await t.query(`SELECT totp_secret FROM admins WHERE id=$1`, [id]);
+  assert.ok(row.rows[0].totp_secret.startsWith('enc:v1:'), 'sekret TOTP zaszyfrowany');
+  assert.ok(!row.rows[0].totp_secret.includes(secret), 'plaintext sekretu nie ma w bazie');
+
+  const { cookieHeader, csrfToken } = await adminLogin(t.client, t.query);
+  const api = authedClient(t.client, cookieHeader, csrfToken);
+  await api('/api/v1/admin/ops/settings/webhook', { method: 'POST', body: JSON.stringify({ enabled: true, url: 'https://discord.com/api/webhooks/999/secret' }) });
+  const wh = await t.query(`SELECT value FROM settings WHERE key='discord_webhook'`);
+  assert.ok(String(wh.rows[0].value.url).startsWith('enc:v1:'), 'URL webhooka zaszyfrowany');
+  assert.ok(!JSON.stringify(wh.rows[0].value).includes('secret'), 'plaintext URL nie jest w bazie');
+});
+
+test('recovery code dziala jednorazowo (B5)', async () => {
+  const { createAdmin, setupTotp, enableTotp, loginAdmin } = await import('../src/services/adminService.js');
+  const { authenticator } = await import('otplib');
+  await createAdmin({ username: 'recoveryadmin', password: 'super-secret-password-123' });
+  const id = (await t.query(`SELECT id FROM admins WHERE username='recoveryadmin'`)).rows[0].id;
+  const { secret } = await setupTotp(id);
+  const { recoveryCodes } = await enableTotp(id, authenticator.generate(secret));
+  const code = recoveryCodes[0];
+  const r1 = await loginAdmin({ username: 'recoveryadmin', password: 'super-secret-password-123', recoveryCode: code });
+  assert.equal(r1.ok, true, 'pierwsze użycie recovery code OK');
+  const r2 = await loginAdmin({ username: 'recoveryadmin', password: 'super-secret-password-123', recoveryCode: code });
+  assert.equal(r2.ok, false, 'drugie użycie tego samego recovery code odrzucone');
+  assert.equal(r2.reason, 'MFA_INVALID');
+  // zły kod TOTP -> MFA_INVALID (a nie mylące TOTP_REQUIRED)
+  const r3 = await loginAdmin({ username: 'recoveryadmin', password: 'super-secret-password-123', totp: '000000' });
+  assert.equal(r3.ok, false);
+  assert.equal(r3.reason, 'MFA_INVALID');
+});
+
+test('wylaczenie MFA wymaga hasla + TOTP/kodu odzyskiwania (D2)', async () => {
+  const { createAdmin, setupTotp, enableTotp, disableTotp } = await import('../src/services/adminService.js');
+  const { authenticator } = await import('otplib');
+  await createAdmin({ username: 'mfadisable', password: 'super-secret-password-123' });
+  const id = (await t.query(`SELECT id FROM admins WHERE username='mfadisable'`)).rows[0].id;
+  const { secret } = await setupTotp(id);
+  await enableTotp(id, authenticator.generate(secret));
+  await assert.rejects(() => disableTotp(id, { password: 'super-secret-password-123' }), /TOTP|odzyskiwania/);
+  await assert.rejects(() => disableTotp(id, { password: 'zle-haslo-12345', totp: authenticator.generate(secret) }), /haslo/i);
+  await disableTotp(id, { password: 'super-secret-password-123', totp: authenticator.generate(secret) });
+  const row = await t.query(`SELECT totp_enabled FROM admins WHERE id=$1`, [id]);
+  assert.equal(row.rows[0].totp_enabled, false);
+});
+
+test('zwykly admin nie moze listowac administratorow (B6 - 403)', async () => {
+  const { createAdmin } = await import('../src/services/adminService.js');
+  await createAdmin({ username: 'plainadmin', password: 'super-secret-password-123', role: 'admin' });
+  const res = await t.client('/api/v1/admin/login', { method: 'POST', body: JSON.stringify({ username: 'plainadmin', password: 'super-secret-password-123' }) });
+  const cookies = res.headers.get('set-cookie');
+  const { csrfToken } = await res.json();
+  const cookieHeader = cookies.split(',').map((c) => c.split(';')[0]).join('; ');
+  const r = await t.client('/api/v1/admin/admins', { headers: { Cookie: cookieHeader } });
+  assert.equal(r.status, 403);
+  // ale statystyki i wlasne konto sa dostepne
+  const stats = await t.client('/api/v1/admin/ops/stats', { headers: { Cookie: cookieHeader } });
+  assert.equal(stats.status, 200);
+});

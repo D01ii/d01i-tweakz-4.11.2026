@@ -7,6 +7,7 @@ import { listAudit } from '../../services/auditService.js';
 import { listAbuseEvents, listBlocks, liftBlock } from '../../services/abuseService.js';
 import { getSetting, setSetting, listSettings } from '../../services/settingsService.js';
 import { query, healthCheck } from '../../db/pool.js';
+import { encryptSecret } from '../../utils/secretCrypto.js';
 
 const router = Router();
 
@@ -79,7 +80,8 @@ router.post('/settings/webhook', requireAdmin, requireRole('superadmin'), adminA
     const parsed = webhookSchema.safeParse(req.body);
     if (!parsed.success) throw httpError(400, 'VALIDATION_ERROR', 'Nieprawidlowa konfiguracja webhooka.');
     if (parsed.data.enabled && !parsed.data.url) throw httpError(400, 'VALIDATION_ERROR', 'Włączony webhook wymaga adresu URL.');
-    await setSetting('discord_webhook', parsed.data, req.admin.adminId);
+    // B4: URL webhooka zapisujemy zaszyfrowany (AES-256-GCM); klucz jest poza baza (env).
+    await setSetting('discord_webhook', { ...parsed.data, url: parsed.data.url ? encryptSecret(parsed.data.url) : parsed.data.url }, req.admin.adminId);
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
