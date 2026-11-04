@@ -55,7 +55,7 @@ if ($cmdLine) {
 }
 
 if ($reasons.Count -gt 0) {
-    Write-Host "Weryfikacja tozsamosci NIEUDANA - NIE zatrzymuje procesu PID $backendPid:" -ForegroundColor Yellow
+    Write-Host "Weryfikacja tozsamosci NIEUDANA - NIE zatrzymuje procesu PID ${backendPid}:" -ForegroundColor Yellow
     $reasons | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
     Write-Host "Plik PID zostaje ($PidFile) do recznej diagnostyki."
     exit 1
