@@ -311,7 +311,8 @@
         <input id="wh-url" type="password" placeholder="https://discord.com/api/webhooks/…">
         <div style="margin-top:10px">${isSuper ? '<button id="wh-save">Zapisz webhook</button>' : '<span class="muted">Zapis webhooka wymaga roli superadmin.</span>'}</div>
       </div>
-      ${isSuper ? `<div class="panel"><h3>Administratorzy</h3>` : ''}
+      ${isSuper ? `
+      <div class="panel"><h3>Administratorzy</h3>
         <table><tr><th>Użytkownik</th><th>Rola</th><th>MFA</th><th>Status</th><th></th></tr>
         ${admins.map((a) => `<tr><td>${esc(a.username)}</td><td>${esc(a.role)}</td>
           <td>${a.totp_enabled ? 'włączone' : '—'}</td>
@@ -323,7 +324,7 @@
         <label>Hasło (min. 12 znaków)</label><input id="na-pass" type="password">
         <label>Rola</label><select id="na-role"><option value="admin">admin</option><option value="superadmin">superadmin</option></select>
         <div style="margin-top:10px"><button id="na-create">Utwórz administratora</button></div>
-      </div>` : '<div class="panel muted">Zarządzanie administratorami i zapis webhooka są dostępne tylko dla superadmina.</div>'};
+      </div>` : '<div class="panel muted">Zarządzanie administratorami i zapis webhooka są dostępne tylko dla superadmina.</div>'}`;
     if (c.querySelector('#wh-save')) c.querySelector('#wh-save').onclick = async () => {
       try {
         await api('/api/v1/admin/ops/settings/webhook', { method: 'POST', body: {
