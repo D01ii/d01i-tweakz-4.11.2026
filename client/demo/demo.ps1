@@ -75,26 +75,29 @@ $script:Logo = @'
 # ----------------------------------------------------------------------------
 $script:State = [ordered]@{
     Version         = $script:Version
-    CreatedUltimate = $false        # czy to my utworzyliśmy plan Ultimate
-    VbsDisabled     = $false        # czy to my wyłączyliśmy VBS/HVCI
-    PagefileTouched = $false        # czy ruszaliśmy plik strony
+    CreatedUltimate = $false
     LastBackupDir   = ''
-    RegUndo         = @()           # lista wpisów rejestru do cofnięcia
-    ServiceUndo     = @()           # lista usług do cofnięcia
-    DisabledTasks   = @()           # lista zadań wyłączonych przez skrypt
-    DnsBackup       = @()           # oryginalne adresy DNS
-    QosPolicies     = @()           # utworzone polityki QoS
-    Applied         = @()           # identyfikatory zastosowanych pakietów
+    RegUndo         = @()
+    ServiceUndo     = @()
+    DisabledTasks   = @()           # obiekty {FullName, OldState}
+    DnsBackup       = @()
+    QosPolicies     = @()
+    Applied         = @()
+    PowerUndo       = @()           # {Sub,Name,Scope,OldValue,OldExisted}
+    PreviousPowerScheme = ''        # aktywny plan przed zmiana
+    HiberWasEnabled = $null         # stan hibernacji przed zmiana
+    NicUndo         = @()           # {PnpId, Name, OldPnpCap}
+    MtuUndo         = @()           # {Alias, OldMtu}
 }
 
 function Load-D01State {
     if (Test-Path $script:StateFile) {
         try {
             $raw = Get-Content -Path $script:StateFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-            foreach ($k in @('RegUndo','ServiceUndo','DisabledTasks','DnsBackup','QosPolicies','Applied')) {
+            foreach ($k in @('RegUndo','ServiceUndo','DisabledTasks','DnsBackup','QosPolicies','Applied','PowerUndo','NicUndo','MtuUndo')) {
                 if ($null -ne $raw.$k) { $script:State[$k] = @($raw.$k) }
             }
-            foreach ($k in @('CreatedUltimate','VbsDisabled','PagefileTouched','LastBackupDir')) {
+            foreach ($k in @('CreatedUltimate','LastBackupDir','PreviousPowerScheme','HiberWasEnabled')) {
                 if ($null -ne $raw.$k) { $script:State[$k] = $raw.$k }
             }
         } catch {
@@ -506,58 +509,40 @@ function Set-D01Service {
         [string]$Desc = ''
     )
     Ensure-D01Backup
-
     $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if (-not $svc) { Write-Info ("Usługa {0}: nie istnieje w tym systemie - pomijam." -f $Name); return }
 
     $oldMode = 'Manual'
     $wmi = Get-CimInstance Win32_Service -Filter ("Name='" + $Name + "'") -ErrorAction SilentlyContinue
     if ($wmi) { $oldMode = $wmi.StartMode }
-    $oldDelayed = 0
-    try { $oldDelayed = [int](Get-ItemProperty -LiteralPath ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $Name) -Name DelayedAutoStart -ErrorAction Stop).DelayedAutoStart } catch { }
+    $oldDelayed = 0; $oldDelayedExisted = $false
+    try {
+        $p = Get-ItemProperty -LiteralPath ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $Name) -Name DelayedAutoStart -ErrorAction Stop
+        $oldDelayed = [int]$p.DelayedAutoStart; $oldDelayedExisted = $true
+    } catch { }
+    $oldRunning = ($svc.Status -eq 'Running')
 
-    if ($script:DryRun) {
-        Write-Info ("[DRY-RUN] SVC: {0}: {1} -> {2}" -f $Name, $oldMode, $Startup)
-        return
-    }
+    if ($script:DryRun) { Write-Info ("[DRY-RUN] SVC: {0}: {1} -> {2}" -f $Name, $oldMode, $Startup); return }
 
     $dup = @($script:State.ServiceUndo | Where-Object { $_.Name -eq $Name } | Select-Object -First 1)
     if ($dup.Count -eq 0) {
-        $script:State.ServiceUndo += [pscustomobject]@{ Name=$Name; OldMode=$oldMode; OldDelayed=$oldDelayed }
+        $script:State.ServiceUndo += [pscustomobject]@{
+            Name=$Name; OldMode=$oldMode; OldDelayed=$oldDelayed
+            OldDelayedExisted=$oldDelayedExisted; OldRunning=$oldRunning
+        }
         Save-D01State
     }
 
     try {
         if ($Startup -ne 'Automatic') { Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue }
         Set-Service -Name $Name -StartupType $Startup -ErrorAction Stop
-        # przy Automatic bez delayed-uśpienia doprecyzuj flagę
-        Set-ItemProperty -LiteralPath ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $Name) -Name DelayedAutoStart -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-        Write-Ok ("SVC: {0}: {1} -> {2} {3}" -f $Name, $oldMode, $Startup, $(if ($Desc) { ' | ' + $Desc } else { '' }))
-    } catch {
-        Write-Err ("SVC {0}: {1}" -f $Name, $_.Exception.Message)
-    }
+        if ($oldDelayedExisted) {
+            Set-ItemProperty -LiteralPath ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $Name) -Name DelayedAutoStart -Value $oldDelayed -Type DWord -Force -ErrorAction SilentlyContinue
+        }
+        Write-Ok ("SVC: {0}: {1} -> {2}" -f $Name, $oldMode, $Startup)
+    } catch { Write-Err ("SVC {0}: {1}" -f $Name, $_.Exception.Message) }
 }
 
-# Standardowe (fabryczne) tryby startu - używane przy przywracaniu, gdy brak zapisu
-$script:ServiceDefaults = @{
-    'DiagTrack'                    = 'Automatic'
-    'dmwappushservice'             = 'Manual'
-    'RetailDemo'                   = 'Manual'
-    'MapsBroker'                   = 'Automatic'
-    'WMPNetworkSvc'                = 'Manual'
-    'Fax'                          = 'Manual'
-    'XblAuthManager'               = 'Manual'
-    'XblGameSave'                  = 'Manual'
-    'XboxNetApiSvc'                = 'Manual'
-    'XboxGipSvc'                   = 'Manual'
-    'DoSvc'                        = 'Automatic'
-    'WSearch'                      = 'Automatic'
-    'SysMain'                      = 'Automatic'
-    'wuauserv'                     = 'Manual'
-    'NvTelemetryContainer'         = 'Automatic'
-    'NVDisplay.ContainerLocalSystem' = 'Automatic'
-    'AMD External Events Utility'  = 'Automatic'
-}
 
 # Wyłącz / włącz zadanie planowane (ścieżka pełna, np. '\Microsoft\Windows\Xyz\Zadanie')
 function Set-D01Task {
@@ -568,31 +553,27 @@ function Set-D01Task {
     Ensure-D01Backup
     $dir  = $FullName.Substring(0, $FullName.LastIndexOf('\') + 1)
     $name = $FullName.Substring($FullName.LastIndexOf('\') + 1)
-
     $task = $null
     try { $task = Get-ScheduledTask -TaskPath $dir -TaskName $name -ErrorAction Stop }
     catch { Write-Info ("Zadanie pominięte (nie istnieje): {0}" -f $FullName); return }
-
-    if ($Action -eq 'Disable' -and $task.State -eq 'Disabled') { Write-Info ("Zadanie już wyłączone: {0}" -f $name); return }
-
-    if ($script:DryRun) {
-        Write-Info ("[DRY-RUN] TASK {0}: {1}" -f $Action, $FullName)
-        return
-    }
-
+    if ($script:DryRun) { Write-Info ("[DRY-RUN] TASK {0}: {1}" -f $Action, $FullName); return }
     try {
         if ($Action -eq 'Disable') {
+            if ($task.State -eq 'Disabled') { Write-Info ("Zadanie już wyłączone: {0}" -f $name); return }
             Disable-ScheduledTask -TaskPath $dir -TaskName $name -ErrorAction Stop | Out-Null
-            if ($script:State.DisabledTasks -notcontains $FullName) { $script:State.DisabledTasks += $FullName; Save-D01State }
+            $dup = @($script:State.DisabledTasks | Where-Object { $_.FullName -eq $FullName } | Select-Object -First 1)
+            if ($dup.Count -eq 0) {
+                $script:State.DisabledTasks += [pscustomobject]@{ FullName=$FullName; OldState='Enabled' }
+                Save-D01State
+            }
             Write-Ok ("TASK wyłączone: {0}" -f $name)
         } else {
             Enable-ScheduledTask -TaskPath $dir -TaskName $name -ErrorAction Stop | Out-Null
-            $script:State.DisabledTasks = @($script:State.DisabledTasks | Where-Object { $_ -ne $FullName }); Save-D01State
+            $script:State.DisabledTasks = @($script:State.DisabledTasks | Where-Object { $_.FullName -ne $FullName })
+            Save-D01State
             Write-Ok ("TASK włączone: {0}" -f $name)
         }
-    } catch {
-        Write-Warn ("TASK {0}: {1}" -f $name, $_.Exception.Message)
-    }
+    } catch { Write-Warn ("TASK {0}: {1}" -f $name, $_.Exception.Message) }
 }
 
 $script:TelemetryTasks = @(
@@ -611,104 +592,158 @@ $script:TelemetryTasks = @(
 # ----------------------------------------------------------------------------
 # 1) ZASILANIE
 # ----------------------------------------------------------------------------
+function Save-D01ActiveScheme {
+    if ([string]::IsNullOrEmpty($script:State.PreviousPowerScheme)) {
+        try {
+            $out = (& powercfg.exe /getactivescheme 2>&1 | Out-String)
+            if ($out -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+                $script:State.PreviousPowerScheme = $Matches[1]; Save-D01State
+            }
+        } catch {}
+    }
+}
+
+function Restore-D01PowerScheme {
+    if (-not [string]::IsNullOrEmpty($script:State.PreviousPowerScheme)) {
+        & powercfg.exe /setactive $script:State.PreviousPowerScheme 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Ok ("Przywrócono poprzedni plan zasilania: {0}" -f $script:State.PreviousPowerScheme) }
+        else { Write-Warn 'Nie udało się przywrócić poprzedniego planu.' }
+    } else { Write-Warn 'Brak zapisanego poprzedniego planu — nie zmieniam aktywnego planu.' }
+    if ($script:State.CreatedUltimate) {
+        & powercfg.exe /delete 'e9a42b02-d5df-448d-aa00-03f14749eb61' 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Ok 'Usunięto plan Ultimate utworzony przez d01i.'; $script:State.CreatedUltimate = $false; Save-D01State }
+    }
+}
+
 function Enable-UltimatePlan {
     Write-Step 'Plan zasilania: Najwyższa wydajność (Ultimate Performance)'
+    Write-Info 'Uwaga: podnosi pobór energii i temperatury CPU; na laptopach tylko na zasilaniu sieciowym.'
     $guid = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
-    if ($script:DryRun) {
-        Write-Info ("[DRY-RUN] powercfg /duplicatescheme {0}; powercfg /setactive {0}" -f $guid)
-        return
-    }
+    if ($script:DryRun) { Write-Info ("[DRY-RUN] powercfg /duplicatescheme + /setactive {0}" -f $guid); return }
     Ensure-D01Backup
-    $exists = $false
+    Save-D01ActiveScheme
     & powercfg.exe /query $guid 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { $exists = $true }
-
-    if (-not $exists) {
+    if ($LASTEXITCODE -ne 0) {
         & powercfg.exe /duplicatescheme $guid 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            $script:State.CreatedUltimate = $true; Save-D01State
-            Write-Ok 'Odblokowano ukryty plan Ultimate Performance.'
-        } else {
-            Write-Err 'Nie udało się utworzyć planu Ultimate Performance.'
-            return
-        }
-    } else {
-        Write-Info 'Plan Ultimate Performance już istnieje.'
-    }
+        if ($LASTEXITCODE -eq 0) { $script:State.CreatedUltimate = $true; Save-D01State; Write-Ok 'Odblokowano ukryty plan Ultimate Performance.' }
+        else { Write-Err 'Nie udało się utworzyć planu Ultimate Performance.'; return }
+    } else { Write-Info 'Plan Ultimate już istnieje (nie usuwamy go przy cofaniu).' }
     & powercfg.exe /setactive $guid 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { Write-Ok 'Aktywowano plan Ultimate Performance.' } else { Write-Err 'Nie udało się aktywować planu.' }
     Add-D01Applied 'power-ultimate' 'Plan zasilania: Ultimate Performance'
 }
 
 function Set-BalancedPlan {
-    if ($script:DryRun) { Write-Info '[DRY-RUN] powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e (Zrównoważony)'; return }
+    if ($script:DryRun) { Write-Info '[DRY-RUN] powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e'; return }
+    Ensure-D01Backup
+    Save-D01ActiveScheme
     & powercfg.exe /setactive '381b4222-f694-41f0-9685-ff5bb260df2e' 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { Write-Ok 'Aktywowano plan Zrównoważony (domyślny).' } else { Write-Warn 'Nie udało się zmienić planu zasilania.' }
-    if ($script:State.CreatedUltimate) {
-        & powercfg.exe /delete 'e9a42b02-d5df-448d-aa00-03f14749eb61' 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { Write-Ok 'Usunięto duplikat planu Ultimate utworzony przez d01i.' }
-        $script:State.CreatedUltimate = $false; Save-D01State
-    }
+    if ($LASTEXITCODE -eq 0) { Write-Ok 'Aktywowano plan Zrównoważony.' } else { Write-Warn 'Nie udało się zmienić planu.' }
 }
 
 function Set-RyzenPlan {
-    <#  Dla Ryzen 5000/7000 zalecany jest plan Zrównoważony + sterownik chipsetu AMD.
-        Szukamy planu "AMD Ryzen Balanced"; jeśli brak - zwykły Zrównoważony.   #>
     Write-Step 'Plan zasilania dla AMD Ryzen'
-    if ($script:DryRun) { Write-Info '[DRY-RUN] Wybór planu AMD Ryzen Balanced / Zrównoważony'; return }
+    if ($script:DryRun) { Write-Info '[DRY-RUN] wybór planu AMD Ryzen Balanced / Zrównoważony'; return }
+    Ensure-D01Backup
+    Save-D01ActiveScheme
     $chosenGuid = '381b4222-f694-41f0-9685-ff5bb260df2e'
     $list = & powercfg.exe /list 2>&1 | Out-String
     foreach ($line in ($list -split "`r?`n")) {
-        if ($line -match 'Ryzen' -and $line -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
-            $chosenGuid = $Matches[1]; break
-        }
+        if ($line -match 'Ryzen' -and $line -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') { $chosenGuid = $Matches[1]; break }
     }
     & powercfg.exe /setactive $chosenGuid 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { Write-Ok ("Aktywowano plan: {0}" -f $chosenGuid) } else { Write-Warn 'Nie udało się zmienić planu.' }
-    Write-Info 'Wskazówka: zainstaluj aktualne sterowniki chipsetu AMD (plan AMD Ryzen Balanced pojawia się wraz z nimi).'
+    Write-Info 'Wskazówka: zainstaluj aktualne sterowniki chipsetu AMD.'
+}
+
+function Get-D01HiberState {
+    try {
+        $out = (& powercfg.exe /a 2>&1 | Out-String)
+        if ($out -match 'niedostępna|not available') { return $false }
+        if ($out -match 'Hibernacja|hibernacja') { return $true }
+        return $null
+    } catch { return $null }
 }
 
 function Disable-Hibernation {
     Write-Step 'Hibernacja: WYŁĄCZENIE'
-    if ($script:DryRun) { Write-Info '[DRY-RUN] powercfg /hibernate off (zwalnia miejsce na C:, szybszy start/stop)' ; return }
+    if ($script:DryRun) { Write-Info '[DRY-RUN] powercfg /hibernate off'; return }
+    $prev = Get-D01HiberState
+    if ($null -eq $prev) { Write-Err 'Nie mozna odczytac stanu hibernacji — NIE wykonuje zmiany (brak backupu).'; return }
     Ensure-D01Backup
+    if ($null -eq $script:State.HiberWasEnabled) { $script:State.HiberWasEnabled = $prev; Save-D01State }
     & powercfg.exe /hibernate off 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { Write-Ok 'Hibernacja wyłączona (hiberfil.sys usunięty, Fast Startup rozbrojony).' }
-    else { Write-Err 'Nie udało się wyłączyć hibernacji.' }
+    if ($LASTEXITCODE -eq 0) { Write-Ok 'Hibernacja wyłączona (Fast Startup rozbrojony).' } else { Write-Err 'Nie udało się wyłączyć hibernacji.' }
     Add-D01Applied 'power-hibernation-off' 'Hibernacja wyłączona'
-    Write-Info 'Efekt uboczny: wyłącza także funkcję Szybki rozruch (Fast Startup) - dla czystych, powtarzalnych startów.'
 }
 
-function Enable-Hibernation {
-    if ($script:DryRun) { Write-Info '[DRY-RUN] powercfg /hibernate on'; return }
-    & powercfg.exe /hibernate on 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { Write-Ok 'Hibernacja włączona (stan domyślny).' } else { Write-Warn 'Nie udało się włączyć hibernacji.' }
+function Restore-Hibernation {
+    if ($null -eq $script:State.HiberWasEnabled) { Write-Warn 'Brak zapisanego stanu hibernacji — nie zmieniam.'; return }
+    if ($script:DryRun) { Write-Info ("[DRY-RUN] hibernacja -> {0}" -f $script:State.HiberWasEnabled); return }
+    if ($script:State.HiberWasEnabled) {
+        & powercfg.exe /hibernate on 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Ok 'Hibernacja przywrócona (włączona).' } else { Write-Warn 'Nie udało się włączyć hibernacji.' }
+    } else {
+        & powercfg.exe /hibernate off 2>&1 | Out-Null
+        Write-Info 'Hibernacja pozostaje wyłączona (taki był stan przed zmianą).'
+    }
+}
+
+
+function Get-D01PowerValue {
+    param([string]$Sub, [string]$Name, [string]$Scope)
+    try {
+        $q = & powercfg.exe /query SCHEME_CURRENT $Sub $Name 2>&1 | Out-String
+        if ($Scope -eq 'AC' -and $q -match 'zasilania AC.*?:\s*([0-9a-fA-Fx]+)') { return $Matches[1] }
+        if ($Scope -eq 'DC' -and $q -match 'zasilania DC.*?:\s*([0-9a-fA-Fx]+)') { return $Matches[1] }
+        if ($q -match 'power setting.*?:\s*([0-9a-fA-Fx]+)') { return $Matches[1] }
+        return $null
+    } catch { return $null }
+}
+
+function Save-D01PowerSetting {
+    param([string]$Sub, [string]$Name, [string]$Scope)
+    $dup = @($script:State.PowerUndo | Where-Object { $_.Sub -eq $Sub -and $_.Name -eq $Name -and $_.Scope -eq $Scope } | Select-Object -First 1)
+    if ($dup.Count -gt 0) { return }
+    $old = Get-D01PowerValue -Sub $Sub -Name $Name -Scope $Scope
+    $script:State.PowerUndo += [pscustomobject]@{ Sub=$Sub; Name=$Name; Scope=$Scope; OldValue=$old; OldExisted=($null -ne $old) }
+    Save-D01State
+}
+
+function Set-D01PowerSetting {
+    param([string]$Sub, [string]$Name, [string]$Scope, [string]$Value)
+    if ($script:DryRun) { Write-Info ("[DRY-RUN] powercfg /set{0}valueindex SCHEME_CURRENT {1} {2} {3}" -f $Scope.ToLower(), $Sub, $Name, $Value); return }
+    Ensure-D01Backup
+    Save-D01PowerSetting -Sub $Sub -Name $Name -Scope $Scope
+    & powercfg.exe ("/set" + $Scope.ToLower() + "valueindex SCHEME_CURRENT $Sub $Name $Value") 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warn ("powercfg {0}/{1} kod {2}" -f $Sub, $Name, $LASTEXITCODE) }
 }
 
 function Set-PowerLowLatency {
-    <#  PCIe ASPM off, USB selective suspend off, min. stan CPU 100% (AC), brak parkowania rdzeni.  #>
-    param([switch]$SkipCpuBoostBits)
-    Write-Step 'Zasilanie: niskie opóźnienia (PCIe / USB / CPU)'
-    $cmds = @(
-        @('Wyłączenie PCIe ASPM (AC)', '/setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ASPM 0'),
-        @('Wyłączenie PCIe ASPM (DC)', '/setdcvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ASPM 0'),
-        @('Wyłączenie zawieszania USB (AC)', '/setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0')
-    )
-    if (-not $SkipCpuBoostBits) {
-        $cmds += @('Minimalny stan procesora 100% (AC)', '/setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 100')
-        $cmds += @('Brak parkowania rdzeni 100% (AC)', '/setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES 100')
-    }
-    foreach ($c in $cmds) {
-        if ($script:DryRun) { Write-Info ("[DRY-RUN] powercfg {0}   # {1}" -f $c[1], $c[0]); continue }
-        Ensure-D01Backup
-        $parts = @($c[1] -split ' ')
-        & powercfg.exe $parts 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { Write-Ok $c[0] } else { Write-Warn ("{0}: powercfg zwrócił kod {1}" -f $c[0], $LASTEXITCODE) }
-    }
+    <# Tylko bezpieczne, odwracalne: PCIe ASPM off + USB selective suspend off (AC i DC).
+       Runda 6: globalne CPU min 100% i parkowanie rdzeni usunięte z uniwersalnego DEMO. #>
+    Write-Step 'Zasilanie: niskie opóźnienia (PCIe ASPM off, USB suspend off)'
+    Set-D01PowerSetting -Sub 'SUB_PCIEXPRESS' -Name 'ASPM' -Scope 'AC' -Value '0'
+    Set-D01PowerSetting -Sub 'SUB_PCIEXPRESS' -Name 'ASPM' -Scope 'DC' -Value '0'
+    Set-D01PowerSetting -Sub '2a737441-1930-4402-8d77-b2bebba308a3' -Name '48e6b7a6-50f5-4782-a5d4-53bb8f07e226' -Scope 'AC' -Value '0'
+    Set-D01PowerSetting -Sub '2a737441-1930-4402-8d77-b2bebba308a3' -Name '48e6b7a6-50f5-4782-a5d4-53bb8f07e226' -Scope 'DC' -Value '0'
     if (-not $script:DryRun) {
         & powercfg.exe /setactive SCHEME_CURRENT 2>&1 | Out-Null
-        Add-D01Applied 'power-lowlatency' 'Zasilanie: PCIe ASPM off / USB suspend off / CPU 100%'
+        Add-D01Applied 'power-lowlatency' 'PCIe ASPM off + USB suspend off'
+        Write-Ok 'Zastosowano. CPU min 100% / parkowanie rdzeni dostępne tylko w PREMIUM.'
     }
+}
+
+function Reset-PowerLowLatency {
+    <# Przywraca WYŁĄCZNIE zapisane wcześniejsze wartości AC/DC. #>
+    Write-Step 'Zasilanie: przywracanie zapisanych wartości'
+    $saved = @($script:State.PowerUndo)
+    if ($saved.Count -eq 0) { Write-Warn 'Brak zapisanych wartości zasilania — nie zmieniam.'; return }
+    foreach ($e in $saved) {
+        if (-not $e.OldExisted) { Write-Info ("Pomijam {0}/{1}/{2} — wartość nie istniała przed zmianą." -f $e.Sub, $e.Name, $e.Scope); continue }
+        Set-D01PowerSetting -Sub $e.Sub -Name $e.Name -Scope $e.Scope -Value ([string]$e.OldValue)
+    }
+    if (-not $script:DryRun) { & powercfg.exe /setactive SCHEME_CURRENT 2>&1 | Out-Null; Write-Ok 'Przywrócono zapisane ustawienia zasilania.' }
 }
 
 function Reset-PowerLowLatency {
@@ -817,42 +852,42 @@ function Invoke-ServiceBasePack {
 }
 
 function Restore-ServicesDefault {
-    Write-Step 'Przywracanie usług do stanu domyślnego'
-    $restored = 0
-    # 1) na podstawie zapisanych stanów
+    Write-Step 'Przywracanie usług do ZAPISANEGO stanu (bez wartości fabrycznych)'
     $saved = @($script:State.ServiceUndo)
+    if ($saved.Count -eq 0) {
+        Write-Warn 'Brak zapisanych stanów usług (brak backupu) — NIE zmieniam żadnej usługi.'
+        return
+    }
+    $restored = 0; $failed = 0
     foreach ($s in $saved) {
         $mode = $s.OldMode
         if ($mode -eq 'Auto') { $mode = 'Automatic' }
         if ($script:DryRun) { Write-Info ("[DRY-RUN] SVC-UNDO: {0} -> {1}" -f $s.Name, $mode); continue }
         try {
             Set-Service -Name $s.Name -StartupType $mode -ErrorAction Stop
-            Set-ItemProperty -LiteralPath ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $s.Name) -Name DelayedAutoStart -Value ([int]$s.OldDelayed) -Type DWord -Force -ErrorAction SilentlyContinue
-            Write-Ok ("SVC-UNDO: {0} -> {1}" -f $s.Name, $mode)
+            if ($s.OldDelayedExisted) {
+                Set-ItemProperty -LiteralPath ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $s.Name) -Name DelayedAutoStart -Value ([int]$s.OldDelayed) -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+            $svc = Get-Service -Name $s.Name -ErrorAction SilentlyContinue
+            if ($svc -and $s.OldRunning -and $svc.Status -ne 'Running') { Start-Service -Name $s.Name -ErrorAction SilentlyContinue }
+            if ($svc -and -not $s.OldRunning -and $svc.Status -eq 'Running') { Stop-Service -Name $s.Name -Force -ErrorAction SilentlyContinue }
+            Write-Ok ("SVC-UNDO: {0} -> {1} (running={2})" -f $s.Name, $mode, $s.OldRunning)
             $restored++
-        } catch { Write-Warn ("SVC-UNDO {0}: {1}" -f $s.Name, $_.Exception.Message) }
+        } catch { Write-Warn ("SVC-UNDO {0}: {1}" -f $s.Name, $_.Exception.Message); $failed++ }
     }
-    # 2) dla usług bez zapisu - wartości fabryczne
-    foreach ($name in $script:ServiceDefaults.Keys) {
-        $already = @($saved | Where-Object { $_.Name -eq $name }).Count -gt 0
-        if ($already) { continue }
-        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
-        if (-not $svc) { continue }
-        if ($script:DryRun) { Write-Info ("[DRY-RUN] SVC-DEFAULT: {0} -> {1}" -f $name, $script:ServiceDefaults[$name]); continue }
-        try {
-            Set-Service -Name $name -StartupType $script:ServiceDefaults[$name] -ErrorAction Stop
-            $restored++
-        } catch { Write-Warn ("SVC-DEFAULT {0}: {1}" -f $name, $_.Exception.Message) }
-    }
-    if (-not $script:DryRun) { $script:State.ServiceUndo = @(); Save-D01State }
-    Write-Ok ("Przywrócono usług: {0}" -f $restored)
+    if (-not $script:DryRun -and $failed -eq 0) { $script:State.ServiceUndo = @(); Save-D01State }
+    Write-Info ("Usługi: przywrócone={0}, nieudane={1} (stan nieudanych zachowany do ponowienia)." -f $restored, $failed)
 }
 
-function Enable-TelemetryTasks {
-    Write-Step 'Włączanie zadań planowanych (przywracanie)'
-    foreach ($t in $script:TelemetryTasks) { Set-D01Task -FullName $t -Action Enable }
-    Set-D01Task -FullName '\Microsoft\Windows\WindowsUpdate\Scheduled Start' -Action Enable
-    Set-D01Task -FullName '\Microsoft\Windows\Defrag\ScheduledDefrag' -Action Enable
+function Restore-D01Tasks {
+    <# Przywraca WYŁĄCZNIE zadania wyłączone przez D01i, których stan przed zmianą był Enabled. #>
+    Write-Step 'Przywracanie zadań planowanych (tylko własne zmiany)'
+    $saved = @($script:State.DisabledTasks)
+    if ($saved.Count -eq 0) { Write-Warn 'Brak zapisanych zadań — nic nie przywracam.'; return }
+    foreach ($t in $saved) {
+        if ($t.OldState -ne 'Enabled') { Write-Info ("Pomijam {0} (przed zmianą było wyłączone przez użytkownika)." -f $t.FullName); continue }
+        Set-D01Task -FullName $t.FullName -Action Enable
+    }
 }
 
 # ----------------------------------------------------------------------------
@@ -1060,12 +1095,32 @@ function New-GameQosPolicy {
 }
 
 function Disable-NicPowerSaving {
-    Write-Step 'Karty sieciowe: wyłączanie oszczędzania energii'
+    Write-Step 'Karty sieciowe: wyłączanie zarządzania energią (z backupem PnPCapabilities)'
     $adapters = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)
     if ($adapters.Count -eq 0) { Write-Warn 'Nie znaleziono fizycznych kart.'; return }
     foreach ($a in $adapters) {
+        $cap = $null; $pnpId = $null
+        try {
+            $na = Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop | Where-Object { $_.Name -eq $a.Name } | Select-Object -First 1
+            if ($na) {
+                $pnpId = $na.PNPDeviceID
+                $inst = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}\" -ErrorAction SilentlyContinue | Where-Object {
+                    (Get-ItemProperty $_.PSPath -Name MatchingDeviceId -ErrorAction SilentlyContinue).MatchingDeviceId -eq $pnpId
+                } | Select-Object -First 1
+                if ($inst) {
+                    $p = Get-ItemProperty $inst.PSPath -Name PnPCapabilities -ErrorAction SilentlyContinue
+                    if ($p) { $cap = [int]$p.PnPCapabilities }
+                }
+            }
+        } catch {}
         if ($script:DryRun) { Write-Info ("[DRY-RUN] Disable-NetAdapterPowerManagement -Name '{0}'" -f $a.Name); continue }
+        if ($null -eq $cap -or -not $pnpId) {
+            Write-Warn ("{0}: nie można odczytać stanu zasilania — NIE wykonuję zmiany (brak backupu)." -f $a.Name)
+            continue
+        }
         Ensure-D01Backup
+        $dup = @($script:State.NicUndo | Where-Object { $_.PnpId -eq $pnpId } | Select-Object -First 1)
+        if ($dup.Count -eq 0) { $script:State.NicUndo += [pscustomobject]@{ PnpId=$pnpId; Name=$a.Name; OldPnpCap=$cap }; Save-D01State }
         try {
             Disable-NetAdapterPowerManagement -Name $a.Name -ErrorAction Stop
             Write-Ok ("Zarządzanie energią OFF: {0}" -f $a.Name)
@@ -1074,26 +1129,53 @@ function Disable-NicPowerSaving {
     Add-D01Applied 'net-nic-power' 'Power management kart sieciowych wyłączony'
 }
 
+function Restore-NicPower {
+    $saved = @($script:State.NicUndo)
+    if ($saved.Count -eq 0) { Write-Warn 'Brak zapisanych stanów kart — nie zmieniam.'; return }
+    foreach ($e in $saved) {
+        try {
+            $inst = Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}\" -ErrorAction SilentlyContinue | Where-Object {
+                (Get-ItemProperty $_.PSPath -Name MatchingDeviceId -ErrorAction SilentlyContinue).MatchingDeviceId -eq $e.PnpId
+            } | Select-Object -First 1
+            if ($inst) {
+                Set-ItemProperty $inst.PSPath -Name PnPCapabilities -Value ([int]$e.OldPnpCap) -Type DWord -Force -ErrorAction Stop
+                Write-Ok ("Przywrócono PnPCapabilities={0}: {1}" -f $e.OldPnpCap, $e.Name)
+            } else { Write-Warn ("Nie znaleziono instancji {0}" -f $e.PnpId) }
+        } catch { Write-Warn ("NIC {0}: {1}" -f $e.Name, $_.Exception.Message) }
+    }
+}
+
 function Show-MtuMenu {
-    Write-Step 'MTU: podgląd / zmiana'
+    Write-Step 'MTU: podgląd / zmiana (z backupem oryginalnego MTU)'
     try {
         Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop |
             Where-Object { $_.ConnectionState -eq 'Connected' } |
             Select-Object InterfaceAlias, NlMtu | Format-Table -AutoSize | Out-Host
-    } catch { Write-Warn 'Nie można odczytać interfejsów.' ; return }
-
+    } catch { Write-Warn 'Nie można odczytać interfejsów.'; return }
     if (-not (Read-YesNo 'Chcesz zmienić MTU na wybranej karcie?')) { return }
     $alias = Read-Host '  Nazwa karty (InterfaceAlias)'
     $mtu   = Read-Host '  Nowe MTU (typowo 1500; dla PPPoE często 1492)'
     [int]$mtuInt = 0
     if (-not [int]::TryParse($mtu, [ref]$mtuInt) -or $mtuInt -lt 576 -or $mtuInt -gt 9000) { Write-Err 'Nieprawidłowa wartość MTU.'; return }
+    $iface = Get-NetIPInterface -AddressFamily IPv4 -InterfaceAlias $alias -ErrorAction SilentlyContinue
+    if (-not $iface) { Write-Err 'Nie znaleziono interfejsu.'; return }
     if ($script:DryRun) { Write-Info ("[DRY-RUN] Set-NetIPInterface -InterfaceAlias '{0}' -NlMtuBytes {1}" -f $alias, $mtuInt); return }
     Ensure-D01Backup
+    $dup = @($script:State.MtuUndo | Where-Object { $_.Alias -eq $alias } | Select-Object -First 1)
+    if ($dup.Count -eq 0) { $script:State.MtuUndo += [pscustomobject]@{ Alias=$alias; OldMtu=[int]$iface.NlMtu }; Save-D01State }
     try {
         Set-NetIPInterface -InterfaceAlias $alias -NlMtuBytes $mtuInt -ErrorAction Stop
-        Write-Ok ("MTU zmienione: {0} -> {1}" -f $alias, $mtuInt)
-        Write-Info 'Test fragmentacji:  ping -f -l 1472 1.1.1.1  (dla MTU 1500)'
+        Write-Ok ("MTU zmienione: {0} -> {1} (poprzednie: {2})" -f $alias, $mtuInt, $iface.NlMtu)
     } catch { Write-Err ("MTU: {0}" -f $_.Exception.Message) }
+}
+
+function Restore-Mtu {
+    $saved = @($script:State.MtuUndo)
+    if ($saved.Count -eq 0) { Write-Warn 'Brak zapisanych wartości MTU — nie zmieniam.'; return }
+    foreach ($e in $saved) {
+        try { Set-NetIPInterface -InterfaceAlias $e.Alias -NlMtuBytes ([int]$e.OldMtu) -ErrorAction Stop; Write-Ok ("MTU przywrócone: {0} -> {1}" -f $e.Alias, $e.OldMtu) }
+        catch { Write-Warn ("MTU {0}: {1}" -f $e.Alias, $_.Exception.Message) }
+    }
 }
 
 # ----------------------------------------------------------------------------
@@ -1377,57 +1459,34 @@ function Invoke-RestoreDefaults {
     Write-Host ''
     if (-not (Read-YesNo 'Na pewno COFNIĘĆ wszystkie zmiany d01i?')) { Write-Info 'Anulowano.'; return }
 
-    Write-Step '1/8 Plan zasilania -> Zrównoważony'
-    Set-BalancedPlan
+    Write-Step '1/8 Plan zasilania -> poprzedni stan'
+    Restore-D01PowerScheme
     Reset-PowerLowLatency
 
-    Write-Step '2/8 Hibernacja -> włączona (stan fabryczny)'
-    Enable-Hibernation
+    Write-Step '2/8 Hibernacja -> zapisany stan'
+    Restore-Hibernation
 
     Write-Step '3/8 Wpisy rejestru -> cofnięcie'
     Restore-D01RegistryChanges
 
-    Write-Step '4/8 Usługi -> domyślne'
+    Write-Step '4/8 Usługi -> zapisany stan'
     Restore-ServicesDefault
 
     Write-Step '5/8 Zadania planowane -> włączone'
-    Enable-TelemetryTasks
+    Restore-D01Tasks
 
-    Write-Step '6/8 DNS + QoS -> przywrócenie'
+    Write-Step '6/8 DNS + QoS + MTU + karty sieciowe -> zapisany stan'
     Reset-D01Dns
     Remove-D01QosPolicies
+    Restore-Mtu
+    Restore-NicPower
 
-    Write-Step '7/8 VBS/HVCI'
-    if ($script:State.VbsDisabled) {
-        if (Read-YesNo 'd01i wyłączył VBS/HVCI. Włączyć z powrotem? (zalecane)') { Enable-Vbs }
-    } else {
-        Write-Info 'VBS nie było ruszane przez d01i.'
-    }
-    Disable-Hags | Out-Null   # przywrócenie domyślnego harmonogramowania, jeśli było zmienione
-
-    Write-Step '8/8 Plik strony'
-    if ($script:State.PagefileTouched -and (Read-YesNo 'Przywrócić plik strony zarządzany przez system?')) {
-        try {
-            $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
-            Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $true } -ErrorAction Stop
-            $script:State.PagefileTouched = $false; Save-D01State
-            Write-Ok 'Plik strony: zarządzany przez system.'
-        } catch { Write-Warn ("Pagefile: {0}" -f $_.Exception.Message) }
-    }
-
-    if (-not $script:DryRun) {
-        $script:State.Applied = @(); Save-D01State
-        Write-Host ''
-        Write-Ok 'Przywracanie zakończone.'
-        Write-Info 'Aplikacje usunięte w debloat: Microsoft Store -> Biblioteka -> pobierz ponownie.'
-        Write-Info 'Dodatkowo masz dostępny punkt przywracania systemu: "d01i - universal / przed optymalizacją".'
-        $script:RebootNeeded = $true
-    }
+    Write-Step 'RAPORT PRZYWRACANIA'
+    Write-Host '  Cofnięcie wykonuje się TYLKO na podstawie zapisanego stanu (d01i_state.json + backup rejestru).' -ForegroundColor DarkGray
+    Write-Host '  Jeśli któryś krok się nie powiódł, jego wpis pozostaje w stanie — uruchom ponownie, aby spróbować jeszcze raz.' -ForegroundColor DarkGray
+    Write-Host '  Punkt przywracania systemu NIE jest usuwany (pozostaje jako ostateczny ratunek).' -ForegroundColor DarkGray
 }
 
-# ----------------------------------------------------------------------------
-# EKRANY POMOCNICZE
-# ----------------------------------------------------------------------------
 function Show-StatusScreen {
     Show-Section 'STATUS SYSTEMU'
     Show-HardwareLine
@@ -1484,7 +1543,7 @@ function Menu-Power {
         Show-Banner
         Show-Section '1) ZASILANIE I PLAN ENERGII'
         Write-Host '   [1] Ultimate Performance (odblokuj ukryty plan + aktywuj)' -ForegroundColor White
-        Write-Host '   [2] Niskie opóźnienia: PCIe ASPM off, USB suspend off, CPU min 100%, bez parkowania rdzeni' -ForegroundColor White
+        Write-Host '   [2] Niskie opóźnienia: PCIe ASPM off, USB suspend off (odwracalne)' -ForegroundColor White
         Write-Host '   [3] Hibernacja: wyłącz (szybszy start, więcej miejsca na C:)' -ForegroundColor White
         Write-Host '   [4] Plan dla Ryzen (AMD Ryzen Balanced / Zrównoważony + CPPC)' -ForegroundColor White
         Write-Host '   [5] Przywróć plan Zrównoważony + domyślne zachowanie' -ForegroundColor White
@@ -1495,7 +1554,7 @@ function Menu-Power {
             '2' { Set-PowerLowLatency; Wait-Enter }
             '3' { Disable-Hibernation; Wait-Enter }
             '4' { Set-RyzenPlan; Wait-Enter }
-            '5' { Set-BalancedPlan; Reset-PowerLowLatency; Enable-Hibernation; Wait-Enter }
+            '5' { Restore-D01PowerScheme; Reset-PowerLowLatency; Restore-Hibernation; Wait-Enter }
             '0' { return }
             default { Write-Warn 'Nieznana opcja.'; Start-Sleep -Milliseconds 600 }
         }
@@ -1542,7 +1601,7 @@ function Menu-Services {
             '3' { Disable-MiscServices; Wait-Enter }
             '6' { Invoke-ServiceBasePack; Wait-Enter }
             '7' { Resume-WindowsUpdate; Wait-Enter }
-            '8' { Restore-ServicesDefault; Enable-TelemetryTasks; Wait-Enter }
+            '8' { Restore-ServicesDefault; Restore-D01Tasks; Wait-Enter }
             '0' { return }
             default { Write-Warn 'Nieznana opcja.'; Start-Sleep -Milliseconds 600 }
         }

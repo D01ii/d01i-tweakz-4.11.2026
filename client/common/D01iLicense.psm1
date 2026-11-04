@@ -1,64 +1,90 @@
 <#
 ================================================================================
-  D01i Tweakz — moduł licencjonowania (WERSJA SERWEROWA, Runda 5)
+  D01i Tweakz — moduł licencjonowania (WERSJA SERWEROWA, Runda 6)
 ================================================================================
   ZASADY:
   - Serwer (backend) jest JEDYNYM źródłem prawdy o licencji.
   - Klient NIE zawiera żadnych sekretów: ani klucza prywatnego Ed25519,
     ani SECRET_ENC_KEY, ani lokalnego algorytmu generującego klucze.
   - Brak internetu = brak autoryzacji do funkcji wymagających licencji
-    (STRICT ONLINE, bez trybu offline / grace period).
-  - Token sesji ma krótki TTL (domyślnie 120 s, patrz TOKEN_TTL_SECONDS
-    backendu) i jest odświeżany przez /api/v1/license/refresh.
-  Wymagania: PowerShell 5.1+.
+    (STRICT ONLINE, bez grace period / trybu offline).
+  - Token sesji ma krótki TTL (domyślnie 120 s) i jest odświeżany przez
+    /api/v1/license/refresh; po wygaśnięciu tokena klient wykonuje ponowną
+    aktywację online zapamiętanym kluczem (chronionym DPAPI).
+  - Adres API konfiguruje użytkownik (D01I_API_BASE lub config.json) —
+    w kliencie NIE ma domyślnej przykładowej domeny.
+  - Zgodność: Windows PowerShell 5.1 (brak operatorów ?? ?: && || ?.)
+    oraz PowerShell 7.
 ================================================================================
 #>
 
-$script:D01iStateDir  = Join-Path $env:ProgramData 'D01iTweakz'
-$script:D01iStateFile = Join-Path $script:D01iStateDir 'license.json'
+$script:D01iStateDir   = Join-Path $env:ProgramData 'D01iTweakz'
+$script:D01iStateFile  = Join-Path $script:D01iStateDir 'license.json'
+$script:D01iConfigFile = Join-Path $script:D01iStateDir 'config.json'
+
+# --- SID-y (nie nazwy angielskie grup) ---
+$script:SidSystem = 'S-1-5-18'
+$script:SidAdmins = 'S-1-5-32-544'
 
 function Get-D01iApiBase {
-    # Kolejność: parametr → zmienna środowiskowa → domyślna domena produkcyjna.
-    if ($env:D01I_API_BASE) { return $env:D01I_API_BASE.TrimEnd('/') }
-    return 'https://api.twojadomena.pl'
+    <# Zwraca skonfigurowany adres API lub $null (brak konfiguracji). NIGDY nie zwraca przykładowej domeny. #>
+    $raw = $env:D01I_API_BASE
+    if (-not $raw -and (Test-Path $script:D01iConfigFile)) {
+        try {
+            $cfg = Get-Content $script:D01iConfigFile -Raw | ConvertFrom-Json
+            $raw = $cfg.api_base
+        } catch {}
+    }
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return $raw.Trim().TrimEnd('/')
+}
+
+function Test-D01iApiBase {
+    <# Walidacja adresu API. Zwraca @{ok; base; error} #>
+    $base = Get-D01iApiBase
+    if (-not $base) {
+        return @{ ok=$false; error='CONFIG_MISSING'; message='Nie skonfigurowano adresu API. Ustaw zmienna srodowiskowa D01I_API_BASE (https://twoj-serwer:8443) lub api_base w %ProgramData%\D01iTweakz\config.json.' }
+    }
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($base, [System.UriKind]::Absolute, [ref]$uri)) {
+        return @{ ok=$false; error='URL_INVALID'; message="Adres API nie jest prawidlowym URL: $base" }
+    }
+    $isLocal = ($uri.Host -eq 'localhost' -or $uri.Host -eq '127.0.0.1' -or $uri.Host -eq '::1')
+    if ($uri.Scheme -eq 'https') { return @{ ok=$true; base=$base } }
+    if ($uri.Scheme -eq 'http' -and $isLocal -and $env:D01I_ALLOW_HTTP -eq '1') {
+        return @{ ok=$true; base=$base }
+    }
+    return @{ ok=$false; error='HTTP_NOT_ALLOWED'; message="Adres API musi uzywac HTTPS (dopuszczalne HTTP tylko dla localhost z D01I_ALLOW_HTTP=1): $base" }
 }
 
 function Get-D01iHwid {
-    # Stabilny HWID maszyny (SHA-256, 16 znaków HEX). Sam HWID nie jest
-    # granicą bezpieczeństwa — serwer egzekwuje HWID_MISMATCH i limit urządzeń.
+    <# Stabilny HWID = SHA-256(CPU ProcessorId | płyta SerialNumber | dysk fizyczny 0 SerialNumber), 16 znaków HEX.
+       Brak którejkolwiek danej = JAWNY BŁĄD (brak stałego HWID awaryjnego — wiele maszyn nie mogłoby współdzielić ID).
+       Nazwa komputera NIE jest częścią HWID. #>
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+    $mb  = Get-CimInstance Win32_BaseBoard -ErrorAction Stop | Select-Object -First 1
+    $disk = Get-CimInstance Win32_DiskDrive -ErrorAction Stop | Where-Object { $_.Index -eq 0 } | Select-Object -First 1
+    if (-not $cpu -or [string]::IsNullOrWhiteSpace([string]$cpu.ProcessorId)) { throw 'HWID: brak ProcessorId CPU — aktywacja niemozliwa.' }
+    if (-not $mb -or [string]::IsNullOrWhiteSpace([string]$mb.SerialNumber)) { throw 'HWID: brak SerialNumber plyty glownej — aktywacja niemozliwa.' }
+    if (-not $disk -or [string]::IsNullOrWhiteSpace([string]$disk.SerialNumber)) { throw 'HWID: brak SerialNumber dysku 0 — aktywacja niemozliwa.' }
+    $raw = "$($cpu.ProcessorId)|$($mb.SerialNumber)|$($disk.SerialNumber)"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
-        $mb  = Get-CimInstance Win32_BaseBoard -ErrorAction Stop | Select-Object -First 1
-        $raw = "$($cpu.ProcessorId)|$($mb.SerialNumber)|$($env:COMPUTERNAME)"
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($raw))
-            return ((($h | ForEach-Object { $_.ToString('X2') }) -join '').Substring(0, 16).ToUpper())
-        } finally { $sha.Dispose() }
-    } catch { return 'HWID-ERR00000000' }
+        $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($raw))
+        return ((($h | ForEach-Object { $_.ToString('X2') }) -join '').Substring(0, 16).ToUpper())
+    } finally { $sha.Dispose() }
 }
 
 function Get-D01iInstallId {
-    # Stabilny identyfikator instalacji = MachineGuid (trwały per maszyna),
-    # zahashowany SHA-256. Przechowywany lokalnie, wysyłany do serwera.
+    <# Stabilny identyfikator instalacji = SHA-256(MachineGuid). Trwały per maszyna; nie zmienia sie przy restarcie.
+       Brak MachineGuid = jawny błąd (nie generujemy losowego ID, które mogłoby zdradzić slot urządzenia). #>
+    $mg = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid
+    if ([string]::IsNullOrWhiteSpace([string]$mg)) { throw 'Brak MachineGuid — identyfikator instalacji niedostepny.' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $mg = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid
-        $sha = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("D01I-INSTALL|$mg"))
-            return ((($h | ForEach-Object { $_.ToString('X2') }) -join '').Substring(0, 32).ToUpper())
-        } finally { $sha.Dispose() }
-    } catch {
-        # awaryjnie: plik z losowym ID pod ProgramData (przetrwa reinstalację klienta)
-        $f = Join-Path $script:D01iStateDir 'install_id.txt'
-        if (Test-Path $f) { return (Get-Content $f -Raw).Trim().ToUpper() }
-        $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
-        $b = New-Object byte[] 16; $rng.GetBytes($b)
-        $id = ((($b | ForEach-Object { $_.ToString('X2') }) -join '')).ToUpper()
-        New-Item -ItemType Directory -Path $script:D01iStateDir -Force -ErrorAction SilentlyContinue | Out-Null
-        Set-Content -Path $f -Value $id -NoNewline
-        return $id
-    }
+        $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("D01I-INSTALL|$mg"))
+        return ((($h | ForEach-Object { $_.ToString('X2') }) -join '').Substring(0, 32).ToUpper())
+    } finally { $sha.Dispose() }
 }
 
 function Invoke-D01iApi {
@@ -69,16 +95,18 @@ function Invoke-D01iApi {
         [object]$Body = $null,
         [int]$TimeoutSec = 15
     )
-    $uri = (Get-D01iApiBase) + $Path
+    $v = Test-D01iApiBase
+    if (-not $v.ok) { return @{ ok=$false; status=0; error=$v.error; message=$v.message } }
+    $uri = $v.base + $Path
     try {
         if ($Method -eq 'GET') {
             $resp = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec $TimeoutSec -ErrorAction Stop
-            return @{ ok = $true; status = 200; body = $resp }
+            return @{ ok=$true; status=200; body=$resp }
         }
-        $json = if ($null -ne $Body) { $Body | ConvertTo-Json -Depth 6 -Compress } else { '{}' }
-        $resp = Invoke-RestMethod -Uri $uri -Method Post -Body $json -ContentType 'application/json' `
-                 -TimeoutSec $TimeoutSec -ErrorAction Stop
-        return @{ ok = $true; status = 200; body = $resp }
+        $json = '{}'
+        if ($null -ne $Body) { $json = $Body | ConvertTo-Json -Depth 6 -Compress }
+        $resp = Invoke-RestMethod -Uri $uri -Method Post -Body $json -ContentType 'application/json' -TimeoutSec $TimeoutSec -ErrorAction Stop
+        return @{ ok=$true; status=200; body=$resp }
     } catch {
         $status = 0; $errBody = $null
         if ($_.Exception.Response) {
@@ -89,8 +117,56 @@ function Invoke-D01iApi {
                 $reader.Dispose()
             } catch {}
         }
-        return @{ ok = $false; status = $status; error = $_.Exception.Message; body = $errBody }
+        $reason = "HTTP_$status"
+        if ($errBody -and $errBody.error) { $reason = $errBody.error }
+        return @{ ok=$false; status=$status; error=$reason; body=$errBody; message=$_.Exception.Message }
     }
+}
+
+function Protect-D01iSecret {
+    <# DPAPI (CurrentUser) — klucz licencyjny nigdy nie leży na dysku jako jawny tekst. #>
+    param([Parameter(Mandatory)][string]$Plain)
+    if ($IsWindows -eq $false -and -not (Get-Variable IsWindows -ErrorAction SilentlyContinue)) {
+        # PS 5.1 nie ma $IsWindows — wykrywamy platformę przez [System.Environment]::OSVersion
+    }
+    $os = [System.Environment]::OSVersion.Platform
+    if ($os -ne [System.PlatformID]::Win32NT) { throw 'DPAPI dostepne tylko na Windows. Odmowa zapisu klucza jako jawnego tekstu.' }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Plain)
+    $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    return [Convert]::ToBase64String($enc)
+}
+
+function Unprotect-D01iSecret {
+    param([Parameter(Mandatory)][string]$B64)
+    $enc = [Convert]::FromBase64String($B64)
+    $dec = [System.Security.Cryptography.ProtectedData]::Unprotect($enc, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    return [System.Text.Encoding]::UTF8.GetString($dec)
+}
+
+function Set-D01iSecureAcl {
+    <# Restrykcyjny ACL katalogu/pliku: tylko SYSTEM (S-1-5-18) i lokalni Administratorzy (S-1-5-32-544).
+       Błędy NIE są ignorowane — zwracamy $false. #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $acl = Get-Acl $Path
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in @($script:SidSystem, $script:SidAdmins)) {
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                (New-Object System.Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'Allow')
+            $acl.AddAccessRule($rule)
+        }
+        Set-Acl $Path $acl
+        return $true
+    } catch { return $false }
+}
+
+function Save-D01iAtomic {
+    <# Atomowy zapis: temp + move. Awaria w trakcie zapisu nie zostawia uszkodzonego pliku. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Content)
+    $tmp = $Path + '.tmp'
+    Set-Content -Path $tmp -Value $Content -Force
+    if (-not (Set-D01iSecureAcl -Path $tmp)) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue; throw "Nie udalo sie zabezpieczyc ACL pliku stanu: $tmp" }
+    Move-Item -Path $tmp -Destination $Path -Force
 }
 
 function Get-D01iLicenseState {
@@ -100,125 +176,137 @@ function Get-D01iLicenseState {
 
 function Save-D01iLicenseState {
     param([Parameter(Mandatory)]$State)
-    New-Item -ItemType Directory -Path $script:D01iStateDir -Force -ErrorAction SilentlyContinue | Out-Null
-    $State | ConvertTo-Json -Depth 6 | Set-Content -Path $script:D01iStateFile -Force
-    # ACL: tylko SYSTEM i Administratorzy (plik zawiera token sesji)
-    try {
-        $acl = Get-Acl $script:D01iStateFile
-        $acl.SetAccessRuleProtection($true, $false)
-        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule('SYSTEM','FullControl','Allow')
-        $acl.AddAccessRule($rule)
-        $rule2 = New-Object System.Security.AccessControl.FileSystemAccessRule('Administrators','FullControl','Allow')
-        $acl.AddAccessRule($rule2)
-        Set-Acl $script:D01iStateFile $acl
-    } catch {}
+    if (-not (Test-Path $script:D01iStateDir)) {
+        New-Item -ItemType Directory -Path $script:D01iStateDir -Force | Out-Null
+        if (-not (Set-D01iSecureAcl -Path $script:D01iStateDir)) { throw 'Nie udalo sie zabezpieczyc katalogu stanu licencji.' }
+    }
+    Save-D01iAtomic -Path $script:D01iStateFile -Content ($State | ConvertTo-Json -Depth 6)
+    if (-not (Set-D01iSecureAcl -Path $script:D01iStateFile)) { throw 'Nie udalo sie zabezpieczyc pliku stanu licencji.' }
 }
 
 function Invoke-D01iActivate {
-    # Aktywacja ręczna kluczem licencyjnym. Zwraca $true przy sukcesie.
+    <# Aktywacja online kluczem. Klucz zapisujemy WYŁĄCZNIE jako DPAPI blob. #>
     param([Parameter(Mandatory)][string]$Key)
     $key = ($Key.Trim() -replace '\s+','').ToUpper()
     if ($key.Length -lt 10) { return @{ ok=$false; reason='KEY_TOO_SHORT' } }
-    $payload = @{
-        key        = $key
-        install_id = Get-D01iInstallId
-        hwid       = Get-D01iHwid
-        label      = $env:COMPUTERNAME
-    }
+    $hwid = $null; $installId = $null
+    try { $hwid = Get-D01iHwid } catch { return @{ ok=$false; reason='HWID_UNAVAILABLE'; message=$_.Exception.Message } }
+    try { $installId = Get-D01iInstallId } catch { return @{ ok=$false; reason='INSTALL_ID_UNAVAILABLE'; message=$_.Exception.Message } }
+    $payload = @{ key=$key; install_id=$installId; hwid=$hwid; label=$env:COMPUTERNAME }
     $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/activate' -Body $payload
-    if (-not $r.ok) {
-        $code = if ($r.body -and $r.body.error) { $r.body.error } else { "HTTP_$($r.status)" }
-        return @{ ok=$false; reason=$code; message=$r.body.message }
-    }
-    Save-D01iLicenseState @{
-        key              = $key
-        install_id       = $payload.install_id
-        hwid             = $payload.hwid
+    if (-not $r.ok) { return @{ ok=$false; reason=$r.error; message=$r.message } }
+    $st = @{
+        key_dpapi        = Protect-D01iSecret -Plain $key
+        install_id       = $installId
+        hwid             = $hwid
         token            = $r.body.token
         token_expires_at = $r.body.token_expires_at
         license          = $r.body.license
         activated_at     = (Get-Date).ToString('o')
     }
+    Save-D01iLicenseState $st
     return @{ ok=$true; license=$r.body.license }
 }
 
 function Invoke-D01iRefresh {
-    # Odświeżenie tokena (rotacja). Sukces → nowy token zapisany lokalnie.
     param([Parameter(Mandatory)]$State)
     if (-not $State.token) { return @{ ok=$false; reason='NO_TOKEN' } }
-    $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/refresh' -Body @{ token = $State.token }
-    if (-not $r.ok) { return @{ ok=$false; reason=($r.body.error ? $r.body.error : "HTTP_$($r.status)") } }
+    $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/refresh' -Body @{ token=$State.token }
+    if (-not $r.ok) { return @{ ok=$false; reason=$r.error } }
     $State.token = $r.body.token
     if ($r.body.token_expires_at) { $State.token_expires_at = $r.body.token_expires_at }
     Save-D01iLicenseState $State
     return @{ ok=$true }
 }
 
+function Invoke-D01iReauth {
+    <# Ponowna aktywacja online po wygaśnięciu tokena — klucz odczytany z DPAPI, użytkownik nie wpisuje go ponownie. #>
+    $st = Get-D01iLicenseState
+    if (-not $st -or -not $st.key_dpapi) { return @{ ok=$false; reason='NO_STORED_KEY' } }
+    $key = $null
+    try { $key = Unprotect-D01iSecret -B64 $st.key_dpapi } catch { return @{ ok=$false; reason='DPAPI_UNAVAILABLE'; message=$_.Exception.Message } }
+    return Invoke-D01iActivate -Key $key
+}
+
 function Test-D01iLicense {
-    <#
-      ONLINE walidacja licencji. Zwraca obiekt:
-      @{ valid=$bool; type='PREMIUM_LIFETIME'|...; reason='...' }
-      valid=$true TYLKO gdy serwer potwierdzi token (po ewentualnym odświeżeniu).
-      Brak internetu / 401 / revoke / expiry / HWID_MISMATCH → valid=$false.
-    #>
+    <# ONLINE walidacja. valid=$true tylko gdy serwer potwierdzi.
+       Cykl: ważny token → OK; token bliski wygaśnięcia → refresh; token wygasły → ponowna aktywacja kluczem DPAPI;
+       revoke/expiry/HWID_MISMATCH/brak internetu → valid=$false (blokada PREMIUM, bez grace period). #>
     param([string[]]$AllowTypes = @('DEMO','PREMIUM_30D','PREMIUM_90D','PREMIUM_LIFETIME'))
+    $v = Test-D01iApiBase
+    if (-not $v.ok) { return @{ valid=$false; reason=$v.error; message=$v.message } }
     $st = Get-D01iLicenseState
     if (-not $st -or -not $st.token) { return @{ valid=$false; reason='NO_LICENSE' } }
-    # jeśli token wygasa za < 30 s — najpierw spróbuj odświeżyć
+    # 1) token jeszcze ważny i ma zapas ≥30 s → validate
+    $needsRefresh = $true
     try {
         $exp = [datetime]::Parse($st.token_expires_at)
-        if ($exp -lt (Get-Date).AddSeconds(30)) {
-            $rf = Invoke-D01iRefresh $st
-            if (-not $rf.ok) { return @{ valid=$false; reason=$rf.reason } }
-            $st = Get-D01iLicenseState
-        }
+        if ($exp -gt (Get-Date).AddSeconds(30)) { $needsRefresh = $false }
     } catch {}
-    $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/validate' -Body @{ token = $st.token }
-    if (-not $r.ok -or -not $r.body.valid) {
-        return @{ valid=$false; reason=($r.body.error ? $r.body.error : "HTTP_$($r.status)") }
+    if ($needsRefresh) {
+        $rf = Invoke-D01iRefresh $st
+        if (-not $rf.ok) {
+            # 2) refresh odrzucony (np. token wygasł) → ponowna aktywacja zapamiętanym kluczem
+            if ($rf.reason -eq 'TOKEN_EXPIRED' -or $rf.reason -eq 'TOKEN_REVOKED' -or $rf.reason -eq 'TOKEN_INVALID') {
+                $ra = Invoke-D01iReauth
+                if (-not $ra.ok) { return @{ valid=$false; reason=$ra.reason; message=$ra.message } }
+                $st = Get-D01iLicenseState
+            } else {
+                return @{ valid=$false; reason=$rf.reason }   # brak internetu / błąd sieci
+            }
+        } else { $st = Get-D01iLicenseState }
     }
-    $type = $r.body.license.type
-    if ($AllowTypes -notcontains $type) { return @{ valid=$false; reason="TYPE_$type" } }
-    return @{ valid=$true; type=$type; license=$r.body.license; device_id=$r.body.device_id }
+    $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/validate' -Body @{ token=$st.token }
+    if (-not $r.ok -or -not $r.body.valid) { return @{ valid=$false; reason=$r.error } }
+    if ($AllowTypes -notcontains $r.body.license.type) { return @{ valid=$false; reason="TYPE_$($r.body.license.type)" } }
+    return @{ valid=$true; type=$r.body.license.type; license=$r.body.license; device_id=$r.body.device_id }
 }
 
 function Assert-D01iPremium {
-    <# Wymaga licencji PREMIUM (online). Zwraca $true/$false i wypisuje komunikat. #>
     param([string]$Feature = 'Ta funkcja')
     $lic = Test-D01iLicense -AllowTypes @('PREMIUM_30D','PREMIUM_90D','PREMIUM_LIFETIME')
     if ($lic.valid) { return $true }
     $map = @{
-        'NO_LICENSE'='Brak aktywnej licencji. Aktywuj klucz (menu: licencja).'
-        'OFFLINE'='Brak polaczenia z serwerem licencji — funkcja PREMIUM niedostepna (tryb online).'
-        'TOKEN_REVOKED'='Licencja zostala uniewazniona (revoke).'
-        'TOKEN_EXPIRED'='Sesja wygasla i nie mozna jej odswiezyc.'
-        'LICENSE_REVOKED'='Licencja zostala uniewazniona.'
-        'LICENSE_EXPIRED'='Licencja wygasla.'
-        'HWID_MISMATCH'='HWID nie zgadza sie z aktywacja — skontaktuj sie z supportem.'
+        'CONFIG_MISSING'   = 'Nie skonfigurowano adresu API (D01I_API_BASE).'
+        'URL_INVALID'      = 'Adres API jest nieprawidlowy.'
+        'HTTP_NOT_ALLOWED' = 'Adres API musi miec HTTPS (HTTP tylko localhost dev).'
+        'NO_LICENSE'       = 'Brak aktywnej licencji. Aktywuj klucz (menu: licencja).'
+        'TOKEN_REVOKED'    = 'Licencja zostala uniewazniona (revoke).'
+        'LICENSE_REVOKED'  = 'Licencja zostala uniewazniona.'
+        'LICENSE_EXPIRED'  = 'Licencja wygasla.'
+        'HWID_MISMATCH'    = 'HWID nie zgadza sie z aktywacja — skontaktuj sie z supportem.'
+        'HWID_UNAVAILABLE' = 'Nie mozna odczytac HWID — aktywacja niemozliwa.'
     }
-    $msg = if ($map[$lic.reason]) { $map[$lic.reason] } else { "Licencja niewazna ($($lic.reason))." }
+    $msg = "Licencja niewazna ($($lic.reason))."
+    if ($map.ContainsKey($lic.reason)) { $msg = $map[$lic.reason] }
+    if ($lic.reason -like 'HTTP_*' -or $lic.reason -like 'CONFIG_*') { $msg = "Brak polaczenia z serwerem licencji — funkcja PREMIUM niedostepna (tryb online). $msg" }
     Write-Host "   [BŁĄD] $Feature wymaga aktywnej licencji PREMIUM: $msg" -ForegroundColor Red
     return $false
 }
 
 function Get-D01iLicenseStatus {
-    # Diagnostyka: /status (nie wymaga odświeżania, tylko ważnego tokenu).
     $st = Get-D01iLicenseState
     if (-not $st -or -not $st.token) { return @{ ok=$false; reason='NO_LICENSE' } }
-    $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/status' -Body @{ token = $st.token }
-    if (-not $r.ok) { return @{ ok=$false; reason=($r.body.error ? $r.body.error : "HTTP_$($r.status)") } }
+    $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/status' -Body @{ token=$st.token }
+    if (-not $r.ok) { return @{ ok=$false; reason=$r.error } }
     return @{ ok=$true; status=$r.body }
 }
 
 function Invoke-D01iDeactivate {
-    # Dezaktywacja biezacego urzadzenia (zwalnia slot limitu 2 urzadzen).
+    <# Dezaktywacja: najpierw token; jeśli token wygasły — key + install_id (backend przyjmuje oba warianty),
+       żeby wygasły token NIGDY nie blokował zwolnienia slotu licencji. #>
     $st = Get-D01iLicenseState
     if (-not $st) { return @{ ok=$false; reason='NO_LICENSE' } }
-    $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/deactivate' -Body @{ token = $st.token; key = $st.key; install_id = $st.install_id }
+    $body = @{ install_id=$st.install_id }
+    if ($st.token) { $body.token = $st.token }
+    if ($st.key_dpapi) {
+        try { $body.key = Unprotect-D01iSecret -B64 $st.key_dpapi } catch {}
+    }
+    $r = Invoke-D01iApi -Method POST -Path '/api/v1/license/deactivate' -Body $body
     if ($r.ok) { Remove-Item $script:D01iStateFile -Force -ErrorAction SilentlyContinue }
-    return @{ ok=$r.ok; reason=($r.body.error ? $r.body.error : $null) }
+    return @{ ok=$r.ok; reason=$r.error }
 }
 
-Export-ModuleMember -Function Get-D01iApiBase, Get-D01iHwid, Get-D01iInstallId, Invoke-D01iApi, `
-    Invoke-D01iActivate, Invoke-D01iRefresh, Test-D01iLicense, Assert-D01iPremium, `
+Export-ModuleMember -Function Get-D01iApiBase, Test-D01iApiBase, Get-D01iHwid, Get-D01iInstallId, Invoke-D01iApi, `
+    Invoke-D01iActivate, Invoke-D01iRefresh, Invoke-D01iReauth, Test-D01iLicense, Assert-D01iPremium, `
     Get-D01iLicenseStatus, Invoke-D01iDeactivate, Get-D01iLicenseState

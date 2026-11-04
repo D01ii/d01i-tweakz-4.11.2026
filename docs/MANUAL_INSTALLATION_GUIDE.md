@@ -346,3 +346,25 @@ Diagnostyka typowych błędów startu (wszystkie komunikaty pochodzą z `backend
 
 - Wszystkie komendy i zmienne powyżej odpowiadają plikom: `backend/package.json`, `backend/.env.example`, `backend/src/config/index.js`, `backend/src/index.js`, `backend/src/app.js` (weryfikacja 2026-11-04, HEAD `99c17eb`).
 - **NIE wykonano w tym środowisku:** instalacji na czystych VM Ubuntu 24.04 / Windows 11 (brak VM) — przed produkcją należy przejść tę instrukcję na czystych maszynach. Testy jednostkowe/integracyjne backendu (53/53) wykonano na prawdziwym PostgreSQL — patrz `docs/TEST_REPORT.md`.
+
+---
+
+## F. Konfiguracja klienta Windows (adres API)
+
+Klient (`client/premium/premium.ps1`, `client/demo/demo.ps1` + `client/common/D01iLicense.psm1`) **nie ma wbudowanej przykładowej domeny**. Adres backendu ustawiasz lokalnie na komputerze użytkownika:
+
+```powershell
+# trwale dla użytkownika (setx) lub dla bieżącej sesji:
+setx D01I_API_BASE "https://api.twojadomena.pl"     # <- TWOJA domena z sekcji B9
+# lub plik konfiguracyjny: %ProgramData%\D01iTweakz\config.json
+# { "api_base": "https://api.twojadomena.pl" }
+```
+
+Zasady (wymuszane przez `Test-D01iApiBase` w `D01iLicense.psm1`):
+
+- bez ustawionego adresu aktywacja jest **zablokowana z czytelnym komunikatem** (`CONFIG_MISSING`);
+- wymagany prawidłowy URL i **HTTPS**; HTTP dopuszczalne tylko dla `localhost`/`127.0.0.1` z `D01I_ALLOW_HTTP=1` (środowisko deweloperskie);
+- klient nie zawiera żadnych sekretów backendu (klucz prywatny Ed25519 i `SECRET_ENC_KEY` zostają wyłącznie na serwerze);
+- klucz licencyjny przechowywany lokalnie jest chroniony **DPAPI** (`license.json` w `%ProgramData%\D01iTweakz`, ACL tylko SYSTEM + Administratorzy via SID), token sesji ma TTL 120 s i jest odświeżany online; po wygaśnięciu tokena klient sam ponawia aktywację zapamiętanym kluczem — bez trybu offline.
+
+**Reguła produktu DEMO/PREMIUM (spójna w backendzie, panelu, kliencie i dokumentacji):** DEMO = bezpłatny klient z bezpiecznym podzbiorem funkcji, **bez wymagania licencji**; PREMIUM = pełne funkcje, wymagana licencja `PREMIUM_*` walidowana online przy każdej operacji (revoke/expiry/HWID mismatch/blokada IP natychmiast blokują; brak internetu = brak PREMIUM). Typ licencji `DEMO` w backendzie służy tylko do ewidencji aktywacji demo i **nie daje uprawnień PREMIUM** (`Assert-D01iPremium` akceptuje wyłącznie `PREMIUM_30D/90D/LIFETIME`).

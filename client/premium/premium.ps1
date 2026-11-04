@@ -86,7 +86,9 @@ function Invoke-License {
         Write-Host '   Twoj HWID : ' -NoNewline -ForegroundColor White
         Write-Host $script:Hwid -ForegroundColor Yellow
         Write-Host '   Serwer    : ' -NoNewline -ForegroundColor White
-        Write-Host (Get-D01iApiBase) -ForegroundColor Yellow
+        $apiBase = Get-D01iApiBase
+        if ($apiBase) { Write-Host $apiBase -ForegroundColor Yellow }
+        else { Write-Host 'NIE SKONFIGUROWANY (ustaw D01I_API_BASE lub config.json)' -ForegroundColor Red }
         Write-Host ''
         Write-Host '   [1] Wprowadz klucz licencyjny (aktywacja online)' -ForegroundColor White
         Write-Host '   [2] Status licencji (diagnostyka)' -ForegroundColor DarkGray
@@ -127,8 +129,9 @@ function Invoke-License {
 # ====================== STAN ======================
 $script:State = [ordered]@{
     Version='2.5'; LastBackupDir=''; RegUndo=@(); ServiceUndo=@(); DisabledTasks=@()
-    VbsDisabled=$false; CreatedUltimate=$false; UltimateSchemeGuid=''; PreviousPowerScheme=''
+    CreatedUltimate=$false; UltimateSchemeGuid=''; PreviousPowerScheme=''
     HibernationWasEnabled=$null; Applied=@(); MsiTouched=@(); CreatedRegistryKeys=@()
+    BcdUndo=@(); PowerUndo=@()
 }
 function Load-State {
     if (Test-Path -LiteralPath $script:StateFile) {
@@ -139,7 +142,7 @@ function Load-State {
             }
         } catch {}
     }
-    foreach ($p in @('RegUndo','ServiceUndo','DisabledTasks','Applied','MsiTouched','CreatedRegistryKeys')) {
+    foreach ($p in @('RegUndo','ServiceUndo','DisabledTasks','Applied','MsiTouched','CreatedRegistryKeys','BcdUndo','PowerUndo')) {
         $script:State[$p] = @($script:State[$p])
     }
 }
@@ -431,12 +434,80 @@ function Set-Task {
         }
     } catch { Write-Warn "TASK $n : $($_.Exception.Message)" }
 }
+function Get-BcdValue {
+    param([string]$Setting)
+    try {
+        $out = (& bcdedit.exe /enum '{current}' 2>&1 | Out-String)
+        if ($out -match "(?m)^\s*$Setting\s+(\S+)") { return $Matches[1] }
+        return $null   # wartość nie istnieje
+    } catch { return $null }
+}
+
+function Set-BcdSetting {
+    param([string]$Setting, [string]$Value)
+    if ($script:DryRun) { Write-Info ("[DRY-RUN] bcdedit /set {0} {1}" -f $Setting, $Value); return }
+    Ensure-Backup
+    $dup = @($script:State.BcdUndo | Where-Object { $_.Setting -eq $Setting } | Select-Object -First 1)
+    if ($dup.Count -eq 0) {
+        $old = Get-BcdValue -Setting $Setting
+        $script:State.BcdUndo += [pscustomobject]@{ Setting=$Setting; OldValue=$old; OldExisted=($null -ne $old) }
+        Save-State
+    }
+    & bcdedit.exe /set $Setting $Value 2>&1 | Out-Null
+}
+
+function Restore-Bcd {
+    <# Przywraca oryginalne wartości BCD; usuwa wartość tylko gdy D01i ją utworzył (wcześniej nie istniała). #>
+    $saved = @($script:State.BcdUndo)
+    if ($saved.Count -eq 0) { Write-Info 'Brak zapisanych zmian BCD.'; return }
+    foreach ($e in $saved) {
+        try {
+            if ($e.OldExisted) {
+                & bcdedit.exe /set $e.Setting $e.OldValue 2>&1 | Out-Null
+                Write-Ok ("BCD przywrócone: {0}={1}" -f $e.Setting, $e.OldValue)
+            } else {
+                & bcdedit.exe /deletevalue '{current}' $e.Setting 2>&1 | Out-Null
+                Write-Ok ("BCD usunięte (utworzone przez d01i): {0}" -f $e.Setting)
+            }
+        } catch { Write-Warn ("BCD {0}: {1}" -f $e.Setting, $_.Exception.Message) }
+    }
+}
+
+function Get-PowerVal {
+    param([string]$SubG, [string]$Setting, [string]$Scope)
+    $q = & powercfg.exe /query SCHEME_CURRENT $SubG $Setting 2>&1 | Out-String
+    if ($Scope -eq 'AC' -and $q -match 'zasilania AC.*?:\s*([0-9a-fA-Fx]+)') { return $Matches[1] }
+    if ($Scope -eq 'DC' -and $q -match 'zasilania DC.*?:\s*([0-9a-fA-Fx]+)') { return $Matches[1] }
+    return $null
+}
+
 function Set-Power {
     [CmdletBinding()]
     param([string]$SubG,[string]$Setting,[string]$Val,[ValidateSet('AC','DC')][string]$AcDc='AC')
+    if ($script:DryRun) { Write-Info ("[DRY-RUN] powercfg /set{0}valueindex {1} {2} {3}" -f $AcDc.ToLower(),$SubG,$Setting,$Val); return $true }
+    Ensure-Backup
+    $dup = @($script:State.PowerUndo | Where-Object { $_.SubG -eq $SubG -and $_.Setting -eq $Setting -and $_.Scope -eq $AcDc } | Select-Object -First 1)
+    if ($dup.Count -eq 0) {
+        $old = Get-PowerVal -SubG $SubG -Setting $Setting -Scope $AcDc
+        $script:State.PowerUndo += [pscustomobject]@{ SubG=$SubG; Setting=$Setting; Scope=$AcDc; OldValue=$old; OldExisted=($null -ne $old) }
+        Save-State
+    }
     $flag = if ($AcDc -eq 'DC') {'/setdcvalueindex'} else {'/setacvalueindex'}
     & powercfg.exe $flag SCHEME_CURRENT $SubG $Setting $Val 2>&1 | Out-Null
+    if (-not $script:DryRun) { & powercfg.exe /setactive SCHEME_CURRENT 2>&1 | Out-Null }
     return ($LASTEXITCODE -eq 0)
+}
+
+function Restore-PowerUndo {
+    $saved = @($script:State.PowerUndo)
+    if ($saved.Count -eq 0) { Write-Info 'Brak zapisanych zmian powercfg.'; return }
+    foreach ($e in $saved) {
+        if (-not $e.OldExisted) { Write-Info ("Pomijam {0}/{1}/{2} (nie istniało przed zmianą)." -f $e.SubG,$e.Setting,$e.Scope); continue }
+        $flag = if ($e.Scope -eq 'DC') {'/setdcvalueindex'} else {'/setacvalueindex'}
+        & powercfg.exe $flag SCHEME_CURRENT $e.SubG $e.Setting $e.OldValue 2>&1 | Out-Null
+        Write-Ok ("powercfg przywrócone: {0}/{1}/{2}={3}" -f $e.SubG,$e.Setting,$e.Scope,$e.OldValue)
+    }
+    & powercfg.exe /setactive SCHEME_CURRENT 2>&1 | Out-Null
 }
 
 
@@ -1180,11 +1251,6 @@ function Invoke-Undo {
     Restore-ServiceUndo
     Restore-TaskUndo
 
-    if ($script:State.HostsBackupFile -and (Test-Path -LiteralPath $script:State.HostsBackupFile)) {
-        try {
-            Copy-Item -LiteralPath $script:State.HostsBackupFile -Destination "$env:SystemRoot\System32\drivers\etc\hosts" -Force -ErrorAction Stop
-            Write-Ok 'Plik hosts przywrocony.'
-        } catch { Write-Warn 'Nie przywrocono pliku hosts.' }
     }
     try { Unregister-ScheduledTask -TaskName $script:AutoRunTaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Startup')) 'd01i_PRO_autorun.bat') -Force -ErrorAction SilentlyContinue
@@ -1193,10 +1259,11 @@ function Invoke-Undo {
     elseif ($script:State.HibernationWasEnabled -eq $false) { & powercfg.exe /hibernate off 2>&1 | Out-Null }
     if ($script:State.PreviousPowerScheme) { & powercfg.exe /setactive $script:State.PreviousPowerScheme 2>&1 | Out-Null }
 
-    # Usuwamy tylko wartosci BCD ustawiane przez ten skrypt.
-    foreach ($setting in @('useplatformclock','useplatformtick','disabledynamictick','tscsyncpolicy','numproc','nx','hypervisorlaunchtype')) {
-        & bcdedit.exe /deletevalue '{current}' $setting 2>&1 | Out-Null
-    }
+    Restore-Bcd
+    Restore-PowerUndo
+
+    $failedNote = ''
+    if (-not ($script:State.LastBackupDir -and (Test-Path -LiteralPath $script:State.LastBackupDir))) { $failedNote += ' brak katalogu backupu rejestru;' }
 
     $script:State = [ordered]@{
         Version='2.5'; LastBackupDir=''; RegUndo=@(); ServiceUndo=@(); DisabledTasks=@()
@@ -1207,7 +1274,13 @@ function Invoke-Undo {
     $script:BackupDone=$false
     $script:RebootNeeded=$true
     Write-Host ''
-    Write-Ok 'Zapisane zmiany zostaly cofniete. Zrestartuj komputer.'
+    Write-Host ''
+    Write-Host '  RAPORT COFANIA:' -ForegroundColor Cyan
+    Write-Host '   - rejestr/usługi/zadania/powercfg/BCD: przywracane tylko z zapisanych stanów.'
+    if ($failedNote) { Write-Warn ("  UWAGI:$failedNote") }
+    Write-Host '   - punkt przywracania systemu i katalog backupu rejestru NIE są usuwane.'
+    Write-Host '   - jeśli któryś krok się nie powiódł, wpis został w d01i_state.json — ponów cofanie.'
+    Write-Ok 'Cofanie zakończone (szczegóły powyżej). Zrestartuj komputer.'
     if(Read-YesNo 'Zrestartowac TERAZ?'){ Restart-Computer -Force }
 }
 

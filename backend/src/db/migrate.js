@@ -3,19 +3,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pool, query } from './pool.js';
+import { pool } from './pool.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, '../../migrations');
 
 export async function migrate({ log = console.log } = {}) {
-  await query(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      name TEXT PRIMARY KEY,
-      applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-  `);
-
   const files = fs
     .readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith('.sql'))
@@ -29,6 +22,14 @@ export async function migrate({ log = console.log } = {}) {
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['d01i_tweakz_migrations']);
+    // R6: tabela sledzenia też powstaje WEWNĄTRZ locka — równoległe procesy na pustej bazie
+    // mogły wyścigać się o wpisy katalogowe pg_type (CREATE TABLE IF NOT EXISTS poza lockiem).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
     const done = new Set((await client.query('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
     for (const file of files) {
       if (done.has(file)) {

@@ -9,6 +9,16 @@ ARGON2_MEMORY_COST=19456 ARGON2_TIME_COST=2 node --test --test-concurrency=1 "te
 ```
 (ARGON2_* tylko skraca testy; produkcja używa 64 MB/3 — Argon2id.)
 
+## Wynik (Runda 6, 2026-11-04): 10 przebiegów × 53/53 PASS, 0 FAIL (po naprawie flaky migratora)
+
+Runda 6 wykryła flaky test współbieżności migratora (R4, ~40% przebiegów): `CREATE TABLE schema_migrations`
+wykonywane było poza advisory lockiem → wyścig o katalogi pg_type. Poprawka w `src/db/migrate.js`
+(tabela tworzona wewnątrz transakcji z lockiem). Po poprawce 10 kolejnych przebiegów bez FAIL.
+
+| Przebieg (R6) | # tests | # pass | # fail |
+|---|---|---|---|
+| 1–10 | 53 | 53 | 0 |
+
 ## Wynik (Runda 5, 2026-11-04): 5 przebiegów × 53/53 PASS, 0 FAIL
 
 Każdy przebieg osobno (stdout `node --test`):
