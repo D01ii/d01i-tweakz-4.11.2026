@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # D01i Tweakz - instalator deweloperski backendu na Windows 11 (Home/Pro)
 # Wymaga: Windows 11, PowerShell 5.1+, uruchomienie jako Administrator.
 # Instaluje NATYWNIE (bez WSL/Dockera): Node.js LTS, PostgreSQL,

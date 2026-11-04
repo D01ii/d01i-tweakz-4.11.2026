@@ -1,4 +1,4 @@
-# D01i Tweakz - dezinstalacja na Windows. NIE usuwa bazy danych bez potwierdzenia.
+﻿# D01i Tweakz - dezinstalacja na Windows. NIE usuwa bazy danych bez potwierdzenia.
 #requires -Version 5.1
 param(
     [string]$InstallDir = "$env:ProgramFiles\D01iTweakz",

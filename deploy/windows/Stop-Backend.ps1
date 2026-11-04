@@ -1,4 +1,4 @@
-# D01i Tweakz - bezpieczne zatrzymanie backendu (Windows), FAIL-CLOSED (Runda 4).
+﻿# D01i Tweakz - bezpieczne zatrzymanie backendu (Windows), FAIL-CLOSED (Runda 4).
 # Zatrzymujemy WYLACZNIE proces zweryfikowany przez backend.pid.json:
 #   PID + StartTime + dokladna sciezka node.exe + oczekiwany skrypt src\index.js
 #   + ODCZYTANA linia polecen (CommandLine) z Win32_Process.

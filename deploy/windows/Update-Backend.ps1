@@ -1,4 +1,4 @@
-# D01i Tweakz - aktualizacja backendu na Windows 11 z pelna sciezka bledu i rollbackiem (C2).
+﻿# D01i Tweakz - aktualizacja backendu na Windows 11 z pelna sciezka bledu i rollbackiem (C2).
 # NIGDY nie dotyka .env, kluczy Ed25519 ani .db_password (konfiguracja i sekrety zostaja).
 #requires -Version 5.1
 param(

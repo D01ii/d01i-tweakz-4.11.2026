@@ -1,4 +1,4 @@
-starter.bat
+﻿starter.bat
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul

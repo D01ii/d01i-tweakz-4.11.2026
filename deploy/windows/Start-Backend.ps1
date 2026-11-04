@@ -1,4 +1,4 @@
-# D01i Tweakz - start backendu (Windows). Bezpieczna identyfikacja wlasnego procesu:
+﻿# D01i Tweakz - start backendu (Windows). Bezpieczna identyfikacja wlasnego procesu:
 # zapisujemy PID + czas startu + pelna sciezke skryptu, zeby Stop-Backend mogl
 # zweryfikowac tozsamosc procesu (takze po ponownym przydzieleniu PID).
 # Uwaga: NIE uzywamy tu zmiennej $pid - koliduje z automatyczna zmienna $PID.

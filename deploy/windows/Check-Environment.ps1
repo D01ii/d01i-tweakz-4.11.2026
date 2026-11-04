@@ -1,4 +1,4 @@
-# D01i Tweakz - diagnostyka środowiska Windows 11 (tylko odczyt).
+﻿# D01i Tweakz - diagnostyka środowiska Windows 11 (tylko odczyt).
 #requires -Version 5.1
 $ErrorActionPreference = 'Continue'
 Write-Host "== D01i Tweakz - Check-Environment ==" -ForegroundColor Cyan
