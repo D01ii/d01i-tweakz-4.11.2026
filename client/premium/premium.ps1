@@ -9,7 +9,6 @@ param([switch]$Demo,[switch]$AutoRun)
 $script:ProductName  = 'd01i tweakz'
 $script:Edition      = 'p v2.5 BITSUM'
 $script:Author       = '(c) 2026 d01i'
-$script:Secret       = 'D01I-GAMING-PRO-2026-XYZ-CHANGE-ME'
 $script:Root         = $PSScriptRoot
 if (-not $script:Root) { $script:Root = (Get-Location).Path }
 $script:LogFile      = Join-Path $script:Root 'd01i_log.txt'
@@ -20,7 +19,6 @@ $script:AutoRunTaskName = 'd01i tweakz p AutoRun'
 $script:BackupDone   = $false
 $script:RebootNeeded = $false
 $script:Licensed     = $false
-$script:LicenseExpires = [datetime]::MinValue
 $script:Hwid         = ''
 $script:Hw           = $null
 $ErrorActionPreference = 'Continue'
@@ -43,191 +41,83 @@ $script:Logo = @'
 ░███████     ░████   ░██████ ░██       ░████    ░███   ░███     ░███████   ░█████░██ ░██    ░██░█████████
 '@
 
-# ====================== LICENCJA ======================
-function Get-Hwid {
-    try {
-        $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
-        $mb  = Get-CimInstance Win32_BaseBoard -ErrorAction Stop | Select-Object -First 1
-        $cpuId = if ($cpu.ProcessorId) { [string]$cpu.ProcessorId } else { 'NO-CPU' }
-        $mbSn  = if ($mb.SerialNumber) { [string]$mb.SerialNumber } else { 'NO-MB' }
-        $raw = "$cpuId|$mbSn|$($env:COMPUTERNAME)"
-        $sha = [System.Security.Cryptography.SHA1]::Create()
-        $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($raw))
-        return ((($h | ForEach-Object { $_.ToString('X2') }) -join '').Substring(0, 16).ToUpper())
-    } catch { return 'HWID-ERR00000000' }
-}
+# ====================== LICENCJA (SERWEROWA — Runda 5) ======================
+# Serwer jest jedynym zrodlem prawdy. Klient nie zawiera sekretow ani lokalnego
+# generatora kluczy. Aktywacja: POST /api/v1/license/activate, walidacja: /validate
+# + odswiezanie /refresh (TTL 120 s). Brak internetu = brak autoryzacji PREMIUM.
+Import-Module (Join-Path $PSScriptRoot '..\common\D01iLicense.psm1') -Force -ErrorAction Stop
 
-function Get-KeyForHwid {
-    param([string]$Hwid,[string]$Expire='9999-12-31')
-    $hmac = [System.Security.Cryptography.HMACSHA256]::new([System.Text.Encoding]::UTF8.GetBytes($script:Secret))
-    $hash = $hmac.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("D01IPRO|$Hwid|$Expire"))
-    $alph = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-    $sb = New-Object System.Text.StringBuilder
-    $bits = 0
-    $val = 0
-    foreach ($b in $hash[0..12]) {
-        $val = ($val -shl 8) -bor [int]$b
-        $bits += 8
-        while ($bits -ge 5) {
-            $bits -= 5
-            $shift = $bits
-            $idx = (($val -shr $shift) -band 31)
-            [void]$sb.Append($alph[$idx])
-            $val = $val -band ((1 -shl $shift) - 1)
-        }
-    }
-    return $sb.ToString().Substring(0, 20)
-}
+function Get-Hwid { return Get-D01iHwid }
 
-function Get-DebugKeyInfo {
-    # Zwraca tabelke z obliczonymi kluczami dla roznych soli - do diagnostyki
-    $out = @()
-    foreach ($exp in @('9999-12-31','2026')) {
-        $k = Get-KeyForHwid $script:Hwid $exp
-        $fmt = ($k -replace '(.{5})','$1-').TrimEnd('-')
-        $out += "$exp  =>  $fmt"
-    }
-    return $out -join "`n"
-}
-
-function Test-License {
-    param([string]$RawKey)
-    if ([string]::IsNullOrWhiteSpace($RawKey)) { return $false }
-    # Sanityzacja wejscia
-    $s = $RawKey.Trim().ToUpper()
-    $s = $s -replace '\s+',''
-    $s = $s -replace '[!]','|'
-    # Dziel po kresce pionowej
-    $parts = $s.Split('|')
-    $k = ($parts[0] -replace '[^A-Z0-9]','')
-    if ($k.Length -ne 20) { return $false }
-    $expFromInput = ''
-    if ($parts.Count -ge 2 -and $parts[1] -match '^(\d{4}-\d{2}-\d{2})') { $expFromInput = $matches[1] }
-
-    # Lista dat do sprawdzenia w kolejnosci:
-    $candidates = New-Object System.Collections.ArrayList
-    if ($expFromInput) { [void]$candidates.Add($expFromInput) }
-    [void]$candidates.Add('9999-12-31')
-    [void]$candidates.Add('2026')
-
-    foreach ($cand in $candidates) {
-        $expected = Get-KeyForHwid $script:Hwid $cand
-        if ($k -ceq $expected) {
-            try {
-                if ($cand -eq '2026') {
-                    $script:LicenseExpires = [datetime]::MaxValue
-                } else {
-                    $script:LicenseExpires = [datetime]::ParseExact($cand,'yyyy-MM-dd',$null)
-                }
-                return $true
-            } catch { return $false }
-        }
-    }
-    return $false
+function Assert-Premium {
+    param([string]$Feature='Ta operacja')
+    return Assert-D01iPremium -Feature $Feature
 }
 
 function Test-StoredLicense {
     [CmdletBinding()]
     param([switch]$Quiet)
-
-    if (-not $script:Hwid) { $script:Hwid = Get-Hwid }
-    if (-not (Test-Path -LiteralPath $script:LicenseFile)) { return $false }
-
-    try {
-        $raw = ([string](Get-Content -LiteralPath $script:LicenseFile -Raw -Encoding UTF8 -ErrorAction Stop)).Trim()
-        if (-not (Test-License $raw)) {
-            if (-not $Quiet) { Write-Warn 'Plik licencji jest uszkodzony lub nieprawidlowy.' }
-            return $false
+    $lic = Test-D01iLicense
+    if ($lic.valid) {
+        $script:LicenseType = $lic.type
+        return $true
+    }
+    if (-not $Quiet) {
+        $why = switch ($lic.reason) {
+            'NO_LICENSE'      { 'Brak aktywnej licencji.' }
+            'TOKEN_REVOKED'   { 'Licencja zostala uniewazniona.' }
+            'LICENSE_REVOKED' { 'Licencja zostala uniewazniona.' }
+            'LICENSE_EXPIRED' { 'Licencja wygasla.' }
+            'HWID_MISMATCH'   { 'HWID nie zgadza sie z aktywacja.' }
+            default           { "Brak polaczenia z serwerem lub sesja niewazna ($($lic.reason))." }
         }
-        if ($script:LicenseExpires -ge (Get-Date).Date) { return $true }
-        if (-not $Quiet) {
-            Write-Warn "Licencja WYGASLA dnia $($script:LicenseExpires.ToString('yyyy-MM-dd'))!"
-            Write-Host '   Kup nowy klucz lub uruchom w trybie DEMO.' -ForegroundColor Yellow
-            Write-Host ''
-        }
-    } catch {
-        if (-not $Quiet) { Write-Warn 'Nie mozna odczytac pliku licencji.' }
+        Write-Warn $why
     }
     return $false
 }
 
 function Invoke-License {
-    $script:Hwid = Get-Hwid
+    $script:Hwid = Get-D01iHwid
     if ($Demo) { return $false }
-    if (Test-StoredLicense) { return $true }
+    if (Test-StoredLicense -Quiet) { return $true }
     do {
         Show-Banner
-        Show-Section 'AKTYWACJA LICENCJI'
+        Show-Section 'AKTYWACJA LICENCJI (online)'
         Write-Host '   Twoj HWID : ' -NoNewline -ForegroundColor White
         Write-Host $script:Hwid -ForegroundColor Yellow
+        Write-Host '   Serwer    : ' -NoNewline -ForegroundColor White
+        Write-Host (Get-D01iApiBase) -ForegroundColor Yellow
         Write-Host ''
-        Write-Host '   Wyslij ten HWID sprzedawcy, otrzymasz klucz.' -ForegroundColor Cyan
-        Write-Host '   Wklej CALA linijke aktywacyjna (z data po | ), jesli masz licencje czasowa.' -ForegroundColor DarkGray
-        Write-Host ''
-        Write-Host '   [1] Wprowadz klucz aktywacyjny' -ForegroundColor White
-        Write-Host '   [2] Tryb DEMO (tylko plan zasilania)' -ForegroundColor DarkGray
-        Write-Host '   [3] Diagnostyka (pokaz klucz dla tego HWID)' -ForegroundColor DarkGray
+        Write-Host '   [1] Wprowadz klucz licencyjny (aktywacja online)' -ForegroundColor White
+        Write-Host '   [2] Status licencji (diagnostyka)' -ForegroundColor DarkGray
+        Write-Host '   [3] Dezaktywuj to urzadzenie' -ForegroundColor DarkGray
+        Write-Host '   [4] Tryb DEMO (tylko bezpieczne optymalizacje)' -ForegroundColor DarkGray
         Write-Host '   [0] Wyjscie' -ForegroundColor White
         $c = Read-Host '   Wybierz'
         switch ($c) {
             '1' {
-                Write-Host '   Skopiuj caly aktywator z wiadomosci (ten z |9999-12-31 na koncu) i wklej tutaj.' -ForegroundColor DarkGray
-                Write-Host '   (W PowerShell wkleja sie PRAWYM przyciskiem myszy, nie Ctrl+V)' -ForegroundColor DarkGray
-                Write-Host ''
-                $k = Read-Host '   Aktywator'
-                # Od razu pokaz co zostalo odczytane, zeby widziec literowke
-                $kSan = ($k.Trim().ToUpper() -replace '\s+','' -replace '[!]','|')
-                $kClean = ($kSan -split '\|')[0] -replace '[^A-Z0-9]',''
-                Write-Host "   Odczytany klucz: $kClean" -ForegroundColor DarkGray
-                if (Test-License $k) {
-                    if ($script:LicenseExpires -lt (Get-Date).Date) {
-                        Write-Err "Klucz wygasl $($script:LicenseExpires.ToString('yyyy-MM-dd'))!"
-                        Start-Sleep 2
-                    } else {
-                        # Zapis w formacie KEY|EXPIRE - zapisujemy tylko 20-znakowy klucz,
-                        # bez daty i separatorow z wklejonej linii aktywacyjnej.
-                        if ($script:LicenseExpires -eq [datetime]::MaxValue) {
-                            $expStr = '9999-12-31'
-                        } else {
-                            $expStr = $script:LicenseExpires.ToString('yyyy-MM-dd')
-                        }
-                        $line = "$kClean|$expStr"
-                        $line | Set-Content $script:LicenseFile -Encoding UTF8 -Force
-                        Write-Host ''
-                        Write-Ok 'Licencja aktywowana!'
-                        Start-Sleep 1
-                        return $true
-                    }
-                } else {
-                    Write-Err 'Nieprawidlowy klucz.'
-                    Write-Host ''
-                    Write-Host '   DEBUG (skopiuj to i wyslij sprzedawcy):' -ForegroundColor DarkYellow
-                    Write-Host "   HWID: $script:Hwid" -ForegroundColor DarkYellow
-                    $kP = Get-KeyForHwid $script:Hwid '9999-12-31'
-                    $kPFmt = ($kP -replace '(.{5})','$1-').TrimEnd('-')
-                    Write-Host "   Klucz permanentny obliczony przez skrypt: $kPFmt" -ForegroundColor DarkYellow
-                    Write-Host "   Wpisany klucz                              : $kClean" -ForegroundColor DarkYellow
-                    Write-Host ''
-                    Start-Sleep 5
+                $k = Read-Host '   Klucz licencyjny'
+                $r = Invoke-D01iActivate -Key $k
+                if ($r.ok) {
+                    Write-Ok "Licencja aktywowana: $($r.license.type), wygasa: $($r.license.expires_at)"
+                    return $true
                 }
+                Write-Err "Aktywacja nieudana: $($r.reason) — $($r.message)"
+                Start-Sleep 2
             }
-            '3' {
-                Write-Host ''
-                Write-Host '   === DIAGNOSTYKA LICENCJI ===' -ForegroundColor Cyan
-                Write-Host "   HWID   : $script:Hwid" -ForegroundColor White
-                foreach ($exp in @('9999-12-31','2026')) {
-                    $k = Get-KeyForHwid $script:Hwid $exp
-                    $f = ($k -replace '(.{5})','$1-').TrimEnd('-')
-                    Write-Host "   $exp : $f" -ForegroundColor White
-                }
-                Write-Host ''
-                Write-Host '   Aktywator permanent: ' -NoNewline -ForegroundColor DarkGray
-                $kPerm = Get-KeyForHwid $script:Hwid '9999-12-31'
-                Write-Host "$kPerm|9999-12-31" -ForegroundColor Green
-                Write-Host ''
+            '2' {
+                $st = Get-D01iLicenseStatus
+                if ($st.ok) {
+                    Write-Info "Typ: $($st.status.license.type)  Status: $($st.status.license.status)  Wygasa: $($st.status.license.expires_at)  Urzadzenia: $($st.status.active_devices)/$($st.status.license.max_devices)"
+                } else { Write-Warn "Status niedostepny: $($st.reason)" }
                 Wait-Enter
             }
-            '2' { return $false }
+            '3' {
+                $r = Invoke-D01iDeactivate
+                if ($r.ok) { Write-Ok 'Urzadzenie dezaktywowane.' } else { Write-Warn "Nie udalo sie: $($r.reason)" }
+                Wait-Enter
+            }
+            '4' { return $false }
             '0' { exit 0 }
             default { Write-Warn 'Zly wybor.'; Start-Sleep -Milliseconds 500 }
         }
@@ -238,7 +128,7 @@ function Invoke-License {
 $script:State = [ordered]@{
     Version='2.5'; LastBackupDir=''; RegUndo=@(); ServiceUndo=@(); DisabledTasks=@()
     VbsDisabled=$false; CreatedUltimate=$false; UltimateSchemeGuid=''; PreviousPowerScheme=''
-    HibernationWasEnabled=$null; MemoryCompressionWasEnabled=$null; Applied=@(); MsiTouched=@(); DefenderExclusions=@(); HostsBackupFile=''; CreatedRegistryKeys=@()
+    HibernationWasEnabled=$null; Applied=@(); MsiTouched=@(); CreatedRegistryKeys=@()
 }
 function Load-State {
     if (Test-Path -LiteralPath $script:StateFile) {
@@ -249,7 +139,7 @@ function Load-State {
             }
         } catch {}
     }
-    foreach ($p in @('RegUndo','ServiceUndo','DisabledTasks','Applied','MsiTouched','DefenderExclusions','CreatedRegistryKeys')) {
+    foreach ($p in @('RegUndo','ServiceUndo','DisabledTasks','Applied','MsiTouched','CreatedRegistryKeys')) {
         $script:State[$p] = @($script:State[$p])
     }
 }
@@ -319,15 +209,8 @@ function Show-Banner {
     Write-Host ''
     $dateStr = Get-Date -Format 'yyyy-MM-dd'
     Write-Host ("        $script:ProductName  $script:Edition   |   $dateStr   |   ") -NoNewline -ForegroundColor DarkGray
-    if ($script:Licensed) {
-        if ($script:LicenseExpires -eq [datetime]::MinValue -or $script:LicenseExpires.Year -ge 2099 -or $script:LicenseExpires -eq [datetime]::MaxValue) {
-            Write-Host 'LICENCJA PERMANENTNA' -ForegroundColor Green -NoNewline
-        } else {
-            $daysLeft = ($script:LicenseExpires.Date - (Get-Date).Date).Days
-            if ($daysLeft -lt 0) { Write-Host 'LICENCJA WYGASLA' -ForegroundColor Red -NoNewline }
-            elseif ($daysLeft -le 7) { Write-Host "wygasa $($script:LicenseExpires.ToString('yyyy-MM-dd')) ($daysLeft dni)" -ForegroundColor Yellow -NoNewline }
-            else { Write-Host "wygasa $($script:LicenseExpires.ToString('yyyy-MM-dd'))" -ForegroundColor Green -NoNewline }
-        }
+    if ($script:Licensed -and $script:LicenseType) {
+        Write-Host ("LICENCJA $script:LicenseType (online)" -replace 'PREMIUM_','PREMIUM ') -ForegroundColor Green -NoNewline
     } else { Write-Host 'TRYB DEMO' -ForegroundColor Yellow -NoNewline }
     Write-Host "  |  $script:Author" -ForegroundColor DarkGray
     Write-Host ''
@@ -556,31 +439,6 @@ function Set-Power {
     return ($LASTEXITCODE -eq 0)
 }
 
-# ====================== C# natywne: RAM + Timer ======================
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-namespace D01i {
-    public static class Native {
-        [DllImport("ntdll.dll", SetLastError=true)]
-        public static extern uint NtSetSystemInformation(int infoClass, ref uint buf, int size);
-        [DllImport("ntdll.dll", SetLastError=true)]
-        public static extern uint NtSetTimerResolution(uint DesiredResolution, bool SetResolution, out uint CurrentResolution);
-        public static uint ClearStandby() { uint v = 4; return NtSetSystemInformation(80, ref v, 4); }
-        public static void SetTimer05() { uint cur; NtSetTimerResolution(5000, true, out cur); }
-    }
-}
-'@ -ErrorAction SilentlyContinue
-function Clear-Ram {
-    try {
-        $status = [D01i.Native]::ClearStandby()
-        if ($status -eq 0) {
-            Write-Ok 'RAM Standby List wyczyszczona.'
-        } else {
-            Write-Warn ('Nie mozna wyczyscic RAM (kod NTSTATUS: 0x{0:X8}).' -f [uint32]$status)
-        }
-    } catch { Write-Warn "Nie mozna wyczyscic RAM: $($_.Exception.Message)" }
-}
 
 # ====================== TWEAKI ======================
 function Enable-Ultimate {
@@ -681,19 +539,6 @@ function Set-Priority {
     Set-Reg 'HKCU:\System\GameConfigStore' GameDVR_FSEBehaviorMode 2 DWord
     Write-Ok 'Priorytety, GameDVR off, FSE fix, Game Mode on.'
     Add-Applied 'reg-prio'
-}
-function Set-Timer05 {
-    Write-Step 'Timer Resolution 0.5ms'
-    & bcdedit.exe /set {current} useplatformtick yes | Out-Null
-    & bcdedit.exe /set {current} disabledynamictick yes | Out-Null
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' GlobalTimerResolutionRequests 1 DWord
-    try {
-        [D01i.Native]::SetTimer05()
-        Write-Ok 'Timer 0.5ms ustawiony dla biezacego procesu (autostart utrzyma go po restarcie).'
-    } catch {
-        Write-Warn 'Nie mozna ustawic timer resolution dla biezacego procesu.'
-    }
-    $script:RebootNeeded=$true; Add-Applied 'reg-timer'
 }
 function Set-MouseFix {
     Write-Step 'Mouse Fix 1:1 (bez akceleracji)'
@@ -801,49 +646,6 @@ function Set-MsiMode {
     Write-Ok "MSI Mode wlaczony dla $n urzadzen (restart wymagany)."
     $script:RebootNeeded=$true; Add-Applied 'tweak-msi'
 }
-function Disable-BaseSvc {
-    Write-Step 'Uslugi: telemetria/Xbox OFF (SysMain zostaje - pomaga w ladowaniu SSD)'
-    $off = @(
-        @{N='DiagTrack';D='Telemetria'},
-        @{N='dmwappushservice';D='WAP push'},
-        @{N='MapsBroker';D='Mapy offline'},
-        @{N='RetailDemo';D='Demo sklepu'},
-        @{N='WMPNetworkSvc';D='WMP sharing'},
-        @{N='XblAuthManager';D='Xbox Auth'},
-        @{N='XblGameSave';D='Xbox Save'},
-        @{N='XboxNetApiSvc';D='Xbox Net'},
-        @{N='XboxGipSvc';D='Xbox Accessory'},
-        @{N='lfsvc';D='Geolokalizacja'},
-        @{N=' diagnosticshub.standardcollector.service';D='Diagnostic Hub'},
-        @{N='TrkWks';D='Distributed Link Tracking'},
-        @{N='WerSvc';D='Error Reporting'},
-        @{N='WSearch';D='Windows Search indexer'}
-    )
-    foreach ($s in $off) { Set-Svc $s.N Disabled $s.D }
-    $tasks = @(
-        '\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser',
-        '\Microsoft\Windows\Application Experience\ProgramDataUpdater',
-        '\Microsoft\Windows\Autochk\Proxy',
-        '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator',
-        '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip',
-        '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector',
-        '\Microsoft\Windows\Feedback\Siuf\DmClient',
-        '\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload',
-        '\Microsoft\Windows\Maps\MapsUpdateTask',
-        '\Microsoft\Windows\Maps\MapsToastTask'
-    )
-    foreach ($t in $tasks) { Set-Task $t Disable }
-    Write-Ok 'Bazowe uslugi i zadania wylaczone.'; Add-Applied 'svc-base'
-}
-function Pause-WU {
-    Write-Step 'Windows Update: wstrzymanie w tle'
-    Set-Svc wuauserv Disabled 'Windows Update'
-    Set-Task '\Microsoft\Windows\WindowsUpdate\Scheduled Start' Disable
-    $pause = (Get-Date).AddDays(30).ToString('yyyy-MM-dd')
-    New-Item 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -Force -ErrorAction SilentlyContinue | Out-Null
-    Set-Reg 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' PauseUpdatesExpiryTime $pause String
-    Write-Ok 'Windows Update wstrzymany na 30 dni.'; Add-Applied 'svc-wu'
-}
 
 # ====================== MOCNE TWEAKI COMPETITIVE ======================
 function Disable-CoreParking {
@@ -859,32 +661,6 @@ function Disable-CoreParking {
         Write-Ok 'Core Parking off, Power Throttling off.'
         Add-Applied 'cpu-parking'
     } catch { Write-Warn "Core Parking: $($_.Exception.Message)" }
-}
-function Disable-MemoryCompression {
-    Write-Step 'RAM: Memory Compression OFF (>=16GB)'
-    if (-not $script:Hw -or $script:Hw.RamGB -lt 16) { Write-Warn 'Za malo RAM, pomijam.'; return }
-    try {
-        $mc = Get-MMAgent -ErrorAction SilentlyContinue
-        if (-not $mc) { Write-Warn 'Wymaga Win10+ z dostepnymi cmdletami, pomijam.'; return }
-        if ($null -eq $script:State.MemoryCompressionWasEnabled) {
-            $script:State.MemoryCompressionWasEnabled = [bool]$mc.MemoryCompression
-            Save-State
-        }
-        if ($mc.MemoryCompression) {
-            Disable-MMAgent -mc -ErrorAction Stop
-            Write-Ok 'Memory Compression wylaczone (restart zalecany).'
-        } else { Write-Ok 'Memory Compression juz wylaczone.' }
-        Add-Applied 'ram-mc'
-    } catch { Write-Warn 'Nie mozna zmienic Memory Compression na tym systemie.' }
-}
-function Disable-HpetGlobally {
-    Write-Step 'HPET off (lepsze latency)'
-    Ensure-Backup
-    & bcdedit /set useplatformclock no 2>&1 | Out-Null
-    & bcdedit /set tscsyncpolicy enhanced 2>&1 | Out-Null
-    Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' SystemResponsiveness 0 DWord
-    Write-Ok 'HPET wylaczone (restart wymagany).'
-    $script:RebootNeeded=$true; Add-Applied 'adv-hpet'
 }
 function Set-NetworkLatency {
     Write-Step 'Siec: NDIS latency off (GSO/LSO/RSC/InterruptModeration)'
@@ -979,17 +755,6 @@ function Disable-VisualFX {
     # Uzyj prostego planu wydajnosci
     Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ThemeManager' ThemeActive 0 String
     Write-Ok 'Efekty wizualne i animacje wylaczone.'; Add-Applied 'ui-visualfx'
-}
-function Set-MaxPerf {
-    Write-Step 'CPU/System: Maksymalna wydajnosc procesow pierwszoplanowych'
-    Ensure-Backup
-    # Win32PrioritySeparation 0x2A = 42 = krotkie kwanty + zmienny priorytet pierwszego planu.
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' Win32PrioritySeparation 42 DWord
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' LargeSystemCache 0 DWord
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' DisablePagingExecutive 1 DWord
-    # Nie ustawiamy numproc ani wartosci SubSystems: ograniczaja one boot lub moga uszkodzic konfiguracje sesji Windows.
-    Write-Ok 'CPU Priority (0x2A), LargeSystemCache off, DisablePagingExecutive on.'
-    Add-Applied 'cpu-maxperf'
 }
 function Invoke-GamePriorityWatcher {
     Write-Step 'Game Priority Watcher w tle'
@@ -1092,18 +857,6 @@ function Set-AutostartGame {
     } catch {
         Write-Err "Nie udalo sie utworzyc zadania autostartu: $($_.Exception.Message)"
     }
-}
-function Set-CstateOff {
-    Write-Step 'CPU: profil niskich opoznien (bez zmian firmware C-state)'
-    Ensure-Backup
-    # C3/C6/C7 sa ustawieniami BIOS/UEFI zaleznymi od platformy. Uniwersalne wpisy
-    # rejestru Capabilities/CStatePolicy nie wylaczaja ich wiarygodnie i moga uszkodzic
-    # konfiguracje zasilania, dlatego modyfikujemy wylacznie udokumentowany plan zasilania.
-    [void](Set-Power -SubG 'SUB_PROCESSOR' -Setting 'PROCTHROTTLEMIN' -Val '100' -AcDc AC)
-    [void](Set-Power -SubG 'SUB_PROCESSOR' -Setting 'PROCTHROTTLEMIN' -Val '100' -AcDc DC)
-    & powercfg.exe /setactive SCHEME_CURRENT 2>&1 | Out-Null
-    Write-Info 'Glebokie C-state zmienia sie w BIOS/UEFI; skrypt ustawil minimalny stan CPU na 100%.'
-    Add-Applied 'cpu-cstate'
 }
 function Disable-DiscordAccel {
     Write-Step 'Discord/Electron: wylaczenie akceleracji sprzetowej (mniej GPU w tle)'
@@ -1277,15 +1030,6 @@ function Disable-EdgePreload {
     Set-Svc WidgetService Disabled 'Widgets' -ErrorAction SilentlyContinue
     Write-Ok 'Edge Startup Boost OFF.'; Add-Applied 'edge-preload'
 }
-function Disable-WUDriverUpdates {
-    Write-Step 'WU: blokada nadpisywania sterownikow GPU'
-    Ensure-Backup
-    $wu='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
-    if(-not (Test-Path $wu)){New-Item $wu -Force | Out-Null}
-    Set-Reg $wu ExcludeWUDriversInQualityUpdate 1 DWord
-    Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching' SearchOrderConfig 0 DWord
-    Write-Ok 'WU nie bedzie nadpisywal sterownikow GPU.'; Add-Applied 'wu-drivers'
-}
 function Set-GameServerPing {
     Write-Step 'Ping do serwerow gier'
     $servers = @(
@@ -1323,19 +1067,6 @@ function Copy-HwidToClipboard {
     } catch { Write-Warn 'Nie mozna skopiowac - zaznacz i skopiuj recznie.' }
     Start-Sleep 1
 }
-function Disable-SpectreMeltdown {
-    Write-Step 'Spectre/Meltdown mitigations OFF (+5-15% FPS, restart)'
-    Write-Warn 'OBNIZA BEZPIECZENSTWO SYSTEMU (wylacza zabezpieczenia procesora).'
-    Write-Warn 'Na wlasne ryzyko! Wymaga restartu.'
-    if(-not (Read-YesNo 'NA PEWNO wylaczyc mitigations?')){ return }
-    Ensure-Backup
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' FeatureSettingsOverride 3 DWord
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' FeatureSettingsOverrideMask 3 DWord
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' EnableVirtualizationBasedSecurity 0 DWord
-    & bcdedit /set nx AlwaysOff 2>&1 | Out-Null
-    $script:RebootNeeded=$true; Add-Applied 'adv-spectre'
-    Write-Ok 'Mitigations OFF - restart po zakonczeniu.'
-}
 function Set-MouseMenuDelay {
     Write-Step 'Mysz: 0ms opoznienia menu'
     Ensure-Backup
@@ -1343,196 +1074,6 @@ function Set-MouseMenuDelay {
     Set-Reg 'HKCU:\Control Panel\Mouse' MouseHoverTime 0 String
     Set-Reg 'HKCU:\Control Panel\Mouse' DoubleClickSpeed 50 String
     Write-Ok 'MenuShowDelay=0, MouseHoverTime=0.'; Add-Applied 'mouse-menu'
-}
-function Disable-TelemetryHosts {
-    Write-Step 'Telemetria: blokada domen w hosts + wylaczenie zadan'
-    Ensure-Backup
-    $hostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
-    # Zachowaj pierwszy, niezmodyfikowany hosts. Nadpisywanie backupu przy kolejnym
-    # uruchomieniu uniemozliwialo poprawne cofniecie zmian.
-    $hostsBackup = "$hostsFile.d01i.bak"
-    if (-not (Test-Path -LiteralPath $hostsBackup)) {
-        Copy-Item -LiteralPath $hostsFile -Destination $hostsBackup -Force -ErrorAction SilentlyContinue
-    }
-    if (Test-Path -LiteralPath $hostsBackup) {
-        $script:State.HostsBackupFile = $hostsBackup
-        Save-State
-    }
-    $blocked = @(
-        'vortex.data.microsoft.com','vortex-win.data.microsoft.com','telecommand.telemetry.microsoft.com',
-        'telecommand.telemetry.microsoft.com.nsatc.net','oca.telemetry.microsoft.com',
-        'oca.telemetry.microsoft.com.nsatc.net','sqm.telemetry.microsoft.com','sqm.telemetry.microsoft.com.nsatc.net',
-        'watson.telemetry.microsoft.com','watson.telemetry.microsoft.com.nsatc.net','redir.metaservices.microsoft.com',
-        'choice.microsoft.com','choice.microsoft.com.nsatc.net','df.telemetry.microsoft.com',
-        'reports.wes.df.telemetry.microsoft.com','wes.df.telemetry.microsoft.com','telemetry.microsoft.com',
-        'services.wes.df.telemetry.microsoft.com','sqm.df.telemetry.microsoft.com','corpext.msitadfs.glbdns2.microsoft.com',
-        'cs1.wpc.v0cdn.net','db5wns1b2w.nsatc.net','fe2.update.microsoft.com.akadns.net','sls.update.microsoft.com.akadns.net',
-        'diagnostics.support.microsoft.com','corp.sms.phicdn.net','feedback.microsoft-hohm.com',
-        'feedback.search.microsoft.com','rad.microsoft.com','preview.msn.com','i1.services.social.microsoft.com',
-        'i1.services.social.microsoft.com.nsatc.net','feedback.windows.com','ca.telemetry.microsoft.com',
-        'oca.microsoft.com','watson.live.com','watson.microsoft.com','statsfe1.ws.microsoft.com','statsfe2.ws.microsoft.com',
-        'survey.watson.microsoft.com','watsonline.microsoft.com','watson.ppe.telemetry.microsoft.com',
-        'telemetry.appex.bing.net','telemetry.urs.microsoft.com','settings-sandbox.data.microsoft.com',
-        'watson.microsoft.com','vortex.bing.com','vortex.data.glbdns2.microsoft.com',
-        'login.live.com'
-    )
-    try {
-        $existing = Get-Content $hostsFile -ErrorAction SilentlyContinue
-        $toAdd = New-Object System.Collections.ArrayList
-        foreach ($dom in $blocked) {
-            if (($existing | Where-Object { $_ -match $dom } | Measure-Object).Count -eq 0) {
-                [void]$toAdd.Add("0.0.0.0 $dom")
-            }
-        }
-        if ($toAdd.Count -gt 0) {
-            $newContent = $existing + "# d01i tweakz p telemetry block begin" + $toAdd + "# d01i tweakz p telemetry block end"
-            $newContent | Set-Content $hostsFile -Encoding ASCII -Force
-            Write-Ok "Dodano $($toAdd.Count) domen telemetrycznych do hosts."
-        } else { Write-Ok 'Domeny telemetryczne juz zablokowane.' }
-    } catch { Write-Warn "Brak uprawnien do zapisu hosts: $($_.Exception.Message)" }
-    # Wszystkie zadania telemetrii poza tymi z base
-    $exTasks = @(
-        '\Microsoft\Windows\Application Experience\AitAgent',
-        '\Microsoft\Windows\Application Experience\PcaPatchDbTask',
-        '\Microsoft\Windows\Application Experience\StartupAppTask',
-        '\Microsoft\Windows\Autoplay\Microsoft Autoplay Repair',
-        '\Microsoft\Windows\Bluetooth\UninstallDeviceTask',
-        '\Microsoft\Windows\Chkdsk\ProactiveScan',
-        '\Microsoft\Windows\Customer Experience Improvement Program\BthSQM',
-        '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator',
-        '\Microsoft\Windows\Customer Experience Improvement Program\CreateObjectTask',
-        '\Microsoft\Windows\Customer Experience Improvement Program\Uploader',
-        '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip',
-        '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector',
-        '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticResolver',
-        '\Microsoft\Windows\Feedback\Siuf\DmClient',
-        '\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload',
-        '\Microsoft\Windows\NetTrace\GatherNetworkInfo',
-        '\Microsoft\Windows\Windows Error Reporting\QueueReporting'
-    )
-    foreach ($t in $exTasks) { Set-Task $t Disable }
-    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' AllowTelemetry 0 DWord
-    Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' AllowTelemetry 0 DWord
-    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PreviewBuilds' AllowBuildPreview 0 DWord
-    Add-Applied 'telemetry-block'
-}
-function Add-GameDefenderExclusions {
-    Write-Step 'Defender: wykluczenia dla Steam/Epic/Riot/Battle.net (NIE wylaczam AV)'
-    Ensure-Backup
-    $candidates = @(
-        "${env:ProgramFiles(x86)}\Steam",
-        "$env:ProgramFiles\Steam",
-        "$env:ProgramFiles\Epic Games",
-        "${env:ProgramFiles(x86)}\Epic Games",
-        "$env:ProgramFiles\Riot Games",
-        "${env:ProgramFiles(x86)}\Riot Games",
-        "${env:ProgramFiles(x86)}\Battle.net",
-        "$env:ProgramFiles\Battle.net",
-        "$env:ProgramFiles\Ubisoft\Ubisoft Game Launcher",
-        "${env:ProgramFiles(x86)}\Ubisoft\Ubisoft Game Launcher",
-        "$env:ProgramFiles\EA Games",
-        "$env:USERPROFILE\Saved Games",
-        "$env:LOCALAPPDATA\Valorant",
-        "$env:LOCALAPPDATA\Counter-Strike 2"
-    )
-    try { $preferences = Get-MpPreference -ErrorAction Stop } catch { Write-Warn 'Nie mozna odczytac ustawien Defendera.'; return }
-    $existingPaths = @($preferences.ExclusionPath)
-    $existingProcesses = @($preferences.ExclusionProcess)
-    $added=0
-    foreach ($p in $candidates) {
-        if ((Test-Path -LiteralPath $p) -and $existingPaths -notcontains $p) {
-            try {
-                Add-MpPreference -ExclusionPath $p -ErrorAction Stop
-                $script:State.DefenderExclusions += [pscustomobject]@{Type='Path';Value=$p}
-                $existingPaths += $p
-                $added++
-            } catch { Write-Warn "Nie dodano wykluczenia Defendera: $p" }
-        }
-    }
-    foreach ($proc in @('cs2.exe','valorant-win64-shipping.exe','fortniteclient-win64-shipping.exe','r5apex.exe','escapefromtarkov.exe')) {
-        if ($existingProcesses -notcontains $proc) {
-            try {
-                Add-MpPreference -ExclusionProcess $proc -ErrorAction Stop
-                $script:State.DefenderExclusions += [pscustomobject]@{Type='Process';Value=$proc}
-                $existingProcesses += $proc
-                $added++
-            } catch { Write-Warn "Nie dodano wykluczenia procesu Defendera: $proc" }
-        }
-    }
-    Save-State
-    Write-Ok "Dodano $added wykluczen dla gier w Defenderze."
-    Add-Applied 'defender-excl'
-}
-function Disable-AllNotifications {
-    Write-Step 'System: wszystkie powiadomienia/Focus Assist ON'
-    Ensure-Backup
-    Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' ToastEnabled 0 DWord
-    Set-Reg 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' DisableNotificationCenter 1 DWord
-    Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' EnableBalloonTips 0 DWord
-    Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudNotifications' DisableCloudNotifications 1 DWord
-    # Focus assist always on - alarms only. Nie zapisujemy wartosci domyslnej w CloudStore,
-    # poniewaz jest to cache zarzadzany przez Windows i wpis nie steruje tym ustawieniem.
-    Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\QuietHours' Enabled 1 DWord
-    Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings' NOC_GLOBAL_SETTING_TOASTS_ENABLED 0 DWord
-    Write-Ok 'Wszystkie powiadomienia wylaczone, Focus Assist ON.'; Add-Applied 'notif-off'
-}
-function Disable-Maintenance {
-    Write-Step 'System: wylaczenie automatycznej konserwacji w tle'
-    Ensure-Backup
-    Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance' MaintenanceDisabled 1 DWord
-    Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance' WakeUp 0 DWord
-    # Wylacz defrag automatyczny i zapisz stan zadania do cofniecia.
-    Set-Task '\Microsoft\Windows\Defrag\ScheduledDefrag' Disable
-    Write-Ok 'Automatyczna konserwacja i defrag w tle OFF.'; Add-Applied 'maint-off'
-}
-function Block-WU-Completely {
-    Write-Step 'WU: BLOKADA trwala (nie tylko 30 dni)'
-    Ensure-Backup
-    Set-Svc wuauserv Disabled 'Windows Update'
-    Set-Svc UsoSvc Disabled 'Update Orchestrator'
-    Set-Svc WaaSMedicSvc Disabled 'WaaS Medic'
-    Set-Svc dosvc Disabled 'Delivery Optimization'
-    Set-Task '\Microsoft\Windows\WindowsUpdate\Scheduled Start' Disable
-    Set-Task '\Microsoft\Windows\WindowsUpdate\sih' Disable
-    Set-Task '\Microsoft\Windows\WindowsUpdate\sihboot' Disable
-    Set-Task '\Microsoft\Windows\UpdateOrchestrator\Policy Install' Disable
-    Set-Task '\Microsoft\Windows\UpdateOrchestrator\Schedule Scan' Disable
-    Set-Task '\Microsoft\Windows\UpdateOrchestrator\USO_UxBroker' Disable
-    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' NoAutoUpdate 1 DWord
-    Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' AUOptions 2 DWord
-    Write-Ok 'WU zablokowany trwale (odblokuj recznie w services.msc).'; Add-Applied 'wu-block'
-}
-function Invoke-AggressiveMode {
-    Write-Step 'TRYB AGRESYWNY (zabija explorer.exe podczas gry)'
-    Write-Warn 'Zamyka EXPLORER.EXE (pasek zadan/pulpit/eksplorator plikow) podczas gry.'
-    Write-Warn 'Sugerowane dla slabych komputerow (dodatkowe 1-3% FPS i mniej nakladek).'
-    if(-not (Read-YesNo 'Wlaczyc tryb agresywny?')){ return }
-    Ensure-Backup
-    $scriptPath = Join-Path $script:Root 'd01i_aggressive.ps1'
-    @'
-param([string]$GameExe)
-if(-not $GameExe){
-    $games='cs2','valorant-win64-shipping','fortniteclient-win64-shipping','r5apex','escapefromtarkov','leagueclient','overwatch','rainbowsix','pubg','dota2','gta5','gtav'
-} else { $games=@($GameExe) }
-Write-Host "Aggressive mode: czekam na gre..." -ForegroundColor Cyan
-$explorerKilled=$false
-while($true){
-    $found=$false
-    foreach($g in $games){
-        $p=Get-Process -Name $g -ErrorAction SilentlyContinue | Select-Object -First 1
-        if($p){ $found=$true; break }
-    }
-    if($found -and -not $explorerKilled){
-        Write-Host "Gra wykryta! Zamykanie explorer.exe..." -ForegroundColor Yellow
-        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-        $explorerKilled=$true
-    }
-    if(-not $found -and $explorerKilled){
-        Write-Host "Gra zamknieta - przywracanie explorer.exe..." -ForegroundColor Green
-        Start-Process explorer.exe
-        $explorerKilled=$false
-    }
-    Start-Sleep -Seconds 5
 }
 '@ | Set-Content $scriptPath -Encoding UTF8
     $bat = Join-Path $script:Root 'TRYB_AGRESYWNY.bat'
@@ -1622,14 +1163,6 @@ function Restore-TaskUndo {
         catch { Write-Warn "Nie przywrocono zadania $full." }
     }
 }
-function Restore-DefenderUndo {
-    foreach ($entry in @($script:State.DefenderExclusions)) {
-        try {
-            if ($entry.Type -eq 'Path') { Remove-MpPreference -ExclusionPath $entry.Value -ErrorAction Stop }
-            elseif ($entry.Type -eq 'Process') { Remove-MpPreference -ExclusionProcess $entry.Value -ErrorAction Stop }
-        } catch { Write-Warn "Nie usunieto wykluczenia Defendera: $($entry.Value)" }
-    }
-}
 function Invoke-Undo {
     Write-Step 'COFANIE WSZYSTKICH ZMIAN'
     Write-Warn 'Przywraca zapisane ustawienia rejestru, uslug, zadan i wykluczen Defendera.'
@@ -1646,7 +1179,6 @@ function Invoke-Undo {
     Restore-CreatedRegistryKeys
     Restore-ServiceUndo
     Restore-TaskUndo
-    Restore-DefenderUndo
 
     if ($script:State.HostsBackupFile -and (Test-Path -LiteralPath $script:State.HostsBackupFile)) {
         try {
@@ -1659,8 +1191,6 @@ function Invoke-Undo {
 
     if ($script:State.HibernationWasEnabled -eq $true) { & powercfg.exe /hibernate on 2>&1 | Out-Null }
     elseif ($script:State.HibernationWasEnabled -eq $false) { & powercfg.exe /hibernate off 2>&1 | Out-Null }
-    if ($script:State.MemoryCompressionWasEnabled -eq $true) { Enable-MMAgent -mc -ErrorAction SilentlyContinue }
-    elseif ($script:State.MemoryCompressionWasEnabled -eq $false) { Disable-MMAgent -mc -ErrorAction SilentlyContinue }
     if ($script:State.PreviousPowerScheme) { & powercfg.exe /setactive $script:State.PreviousPowerScheme 2>&1 | Out-Null }
 
     # Usuwamy tylko wartosci BCD ustawiane przez ten skrypt.
@@ -1671,7 +1201,7 @@ function Invoke-Undo {
     $script:State = [ordered]@{
         Version='2.5'; LastBackupDir=''; RegUndo=@(); ServiceUndo=@(); DisabledTasks=@()
         VbsDisabled=$false; CreatedUltimate=$false; UltimateSchemeGuid=''; PreviousPowerScheme=''
-        HibernationWasEnabled=$null; MemoryCompressionWasEnabled=$null; Applied=@(); MsiTouched=@(); DefenderExclusions=@(); HostsBackupFile=''; CreatedRegistryKeys=@()
+        HibernationWasEnabled=$null; Applied=@(); MsiTouched=@(); CreatedRegistryKeys=@()
     }
     Save-State
     $script:BackupDone=$false
@@ -1697,67 +1227,6 @@ function Set-Hags {
     Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' HwSchMode 2 DWord
     Write-Ok 'HAGS wlaczony (restart wymagany).'
     $script:RebootNeeded=$true; Add-Applied 'gpu-hags'
-}
-function Clear-Shaders {
-    Write-Step 'Cache shaderow i Temp'
-    $paths = @(
-        "$env:LOCALAPPDATA\NVIDIA\DXCache",
-        "$env:LOCALAPPDATA\NVIDIA\GLCache",
-        "$env:LOCALAPPDATA\NVIDIA Corporation\NV_Cache",
-        "$env:LOCALAPPDATA\AMD\DxCache",
-        "$env:LOCALAPPDATA\AMD\GLCache",
-        "$env:LOCALAPPDATA\D3DSCache",
-        "$env:TEMP"
-    )
-    $sum=0
-    foreach ($p in $paths) {
-        if (Test-Path $p) {
-            $s = [math]::Round(((Get-ChildItem $p -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum/1MB),1)
-            Remove-Item "$p\*" -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Ok "$(Split-Path $p -Leaf): $s MB"
-            $sum+=$s
-        }
-    }
-    Write-Ok "Zwolniono $([math]::Round($sum,1)) MB."; Add-Applied 'clean-cache'
-}
-function Invoke-KillMode {
-    Write-Step 'KILL MODE: zamykanie procesow w tle (NIE rusza Discorda/Steama/przegladarek)'
-    if (-not $script:Licensed) { Write-Err 'Tylko w pelnej wersji!'; return }
-    # TYLKO syf ktory NIE jest potrzebny w tle podczas gry - nie zabijamy komunikatorow/przegladarek
-    $killList = @(
-        'OneDrive','OneDriveSetup','Teams','CCXProcess','CoreSync','AdobeIPCBroker',
-        'GoogleUpdate','EpicWebHelper','EpicGamesLauncher','Battle.net','SteamWebHelper',
-        'SearchHost','StartMenuExperienceHost','WidgetService','Widgets','GameBar','GameDVR',
-        'GameBarFTServer','OfficeClickToRun','TeamViewer','AnyDesk','SkypeApp',
-        'Mozilla Firefox Crash Reporter','DiscordCanary','DiscordPTB',
-        'Cortana','CompatTelRunner','wsappx','Clipchamp','Telemetry','NvTelemetryContainer',
-        'Razer Central','Razer Synapse','Razer Chroma SDK','Razer Chroma Host',
-        'LogiRegistryService','LogiOptions','LGHUB'
-    )
-    $k=0
-    $beforeRam = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory
-    foreach ($pn in $killList) {
-        Get-Process -Name $pn -ErrorAction SilentlyContinue | ForEach-Object {
-            try { Stop-Process -Id $_.Id -Force -ErrorAction Stop; $k++ } catch {}
-        }
-    }
-    Clear-Ram
-    $afterRam = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory
-    $freedMb = [math]::Round(($afterRam-$beforeRam)/1024,0)
-    Write-Ok "Zamknieto procesow: $k, zwolniono ok. $freedMb MB RAM."; Add-Applied 'kill-mode'
-}
-function Disable-Vbs {
-    Write-Step 'VBS/HVCI/Core Isolation: wylaczenie'
-    Write-Warn 'Obniza bezpieczenstwo, ale daje +5-15% FPS.'
-    if (-not (Read-YesNo 'Wylaczyc VBS/HVCI? (restart)')) { return }
-    Ensure-Backup
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' EnableVirtualizationBasedSecurity 0 DWord
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' Enabled 0 DWord
-    Set-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\CredentialGuard' Enabled 0 DWord
-    & bcdedit.exe /set {current} hypervisorlaunchtype off | Out-Null
-    $script:State.VbsDisabled=$true; Save-State
-    Write-Ok 'VBS/HVCI wylaczone.'
-    $script:RebootNeeded=$true; Add-Applied 'adv-vbs'
 }
 
 # ====================== SELF-TEST ======================
@@ -1836,170 +1305,68 @@ function Show-Progress {
     if ($Step -ge $Total) { Write-Host '' }
 }
 function Invoke-ProfileSafe {
-    Write-Step 'PROFIL SAFE - bezpieczny (polecany na start / laptopy)'
-    if(-not $script:Licensed){ Write-Err 'Tylko w pelnej wersji!'; return }
-    $total=12; $i=0
-    Show-Progress (++$i) $total 'Backup...'; Ensure-Backup
-    Show-Progress (++$i) $total 'Plan Ultimate...'; Enable-Ultimate
-    Show-Progress (++$i) $total 'MMCSS...'; Set-Mmcss
-    Show-Progress (++$i) $total 'Priorytety...'; Set-Priority
-    Show-Progress (++$i) $total 'Mouse fix...'; Set-MouseFix
-    Show-Progress (++$i) $total 'Timer 0.5ms...'; Set-Timer05
-    Show-Progress (++$i) $total 'TCP/IP safe...'; Set-Network
-    Show-Progress (++$i) $total 'HAGS...'; Set-Hags
-    Show-Progress (++$i) $total 'Cache...'; Clear-Shaders
-    Show-Progress (++$i) $total 'RAM...'; Clear-Ram
-    Show-Progress (++$i) $total 'Edge preload off...'; Disable-EdgePreload
-    Show-Progress (++$i) $total 'Discord accel off...'; Disable-DiscordAccel
-    Add-Applied 'profile-safe'; Save-State
-    Show-Progress $total $total 'Gotowe SAFE!'
-    Write-Host ''; Write-Ok 'PROFIL SAFE zastosowany! (bezpieczny, latwo cofnac [16])'
-    Write-Info 'Restart zalecany.'
-    Wait-Enter
+    # DEMO/SAFE: tylko bezpieczne, uniwersalne optymalizacje (bez licencji lub z licencja).
+    Write-Step 'PROFIL SAFE (bezpieczny)'
+    Ensure-Backup
+    Set-Power 'HighPerformance'
+    Disable-VisualFX
+    Disable-WidgetsCopilot
+    Disable-StickyKeys
+    Write-Ok 'Profil SAFE zakonczony.'
 }
 function Invoke-ProfileBalanced {
-    Write-Step 'PROFIL BALANCED - zbalansowany (polecany 90% graczy)'
-    if(-not $script:Licensed){ Write-Err 'Tylko w pelnej wersji!'; return }
-    $total=22; $i=0
-    Show-Progress (++$i) $total 'Backup...'; Ensure-Backup
-    Show-Progress (++$i) $total 'Plan Ultimate...'; Enable-Ultimate
-    Show-Progress (++$i) $total 'Hibernacja off...'; Disable-Hibernation
-    Show-Progress (++$i) $total 'MMCSS...'; Set-Mmcss
-    Show-Progress (++$i) $total 'Priorytety...'; Set-Priority
-    Show-Progress (++$i) $total 'CPU MaxPerf...'; Set-MaxPerf
-    Show-Progress (++$i) $total 'Timer...'; Set-Timer05
-    Show-Progress (++$i) $total 'USB off...'; Disable-USBSelectiveSuspend
-    Show-Progress (++$i) $total 'Mouse fix...'; Set-MouseFix
-    Show-Progress (++$i) $total 'TCP/IP...'; Set-Network
-    Show-Progress (++$i) $total 'Auto DNS...'; Set-AutoDns
-    Show-Progress (++$i) $total 'MSI Mode...'; Set-MsiMode
-    Show-Progress (++$i) $total 'Uslugi base...'; Disable-BaseSvc
-    Show-Progress (++$i) $total 'HAGS...'; Set-Hags
-    Show-Progress (++$i) $total 'Fullscreen Opt...'; Disable-FullscreenOpt
-    Show-Progress (++$i) $total 'SSD tweaks...'; Set-SSDTweaks
-    Show-Progress (++$i) $total 'Cache...'; Clear-Shaders
-    Show-Progress (++$i) $total 'RAM...'; Clear-Ram
-    Show-Progress (++$i) $total 'Smart ISLC...'; Invoke-SmartISLC
-    Show-Progress (++$i) $total 'Game Priority...'; Invoke-GamePriorityWatcher
-    Show-Progress (++$i) $total 'Autostart...'; Set-AutostartGame
-    Add-Applied 'profile-balanced'; Save-State
-    Show-Progress $total $total 'Gotowe BALANCED!'
-    Write-Host ''; Write-Ok 'PROFIL BALANCED zastosowany!'
-    Write-Info 'Restart zalecany.'
-    Wait-Enter
+    if (-not (Assert-Premium -Feature 'Profil BALANCED')) { Wait-Enter; return }
+    Write-Step 'PROFIL BALANCED (polecany)'
+    Ensure-Backup
+    Set-Power 'HighPerformance'
+    Set-Network
+    Set-AutoDns
+    Set-MouseFix
+    Disable-VisualFX
+    Disable-WidgetsCopilot
+    Set-Mmcss
+    Set-Priority
+    Write-Ok 'Profil BALANCED zakonczony.'
 }
 function Invoke-ProfileAdvanced {
-    Write-Step 'PROFIL ADVANCED - zaawansowany (wiecej FPS, wiecej zmian)'
-    if(-not $script:Licensed){ Write-Err 'Tylko w pelnej wersji!'; return }
-    Write-Warn 'Zawiera: NDIS latency, Visual FX off, Powiadomienia off, WU pause.'
-    if(-not (Read-YesNo 'Kontynuowac ADVANCED?')){ return }
-    $total=32; $i=0
-    Show-Progress (++$i) $total 'Backup...'; Ensure-Backup
-    Show-Progress (++$i) $total 'Plan Ultimate...'; Enable-Ultimate
-    Show-Progress (++$i) $total 'Hibernacja off...'; Disable-Hibernation
-    Show-Progress (++$i) $total 'MMCSS...'; Set-Mmcss
-    Show-Progress (++$i) $total 'Priorytety...'; Set-Priority
-    Show-Progress (++$i) $total 'CPU MaxPerf...'; Set-MaxPerf
-    Show-Progress (++$i) $total 'Timer...'; Set-Timer05
-    Show-Progress (++$i) $total 'Core Parking...'; Disable-CoreParking
-    Show-Progress (++$i) $total 'CPU latency...'; Set-CstateOff
-    Show-Progress (++$i) $total 'USB...'; Disable-USBSelectiveSuspend
-    Show-Progress (++$i) $total 'Mouse...'; Set-MouseFix
-    Show-Progress (++$i) $total 'Mouse delay...'; Set-MouseMenuDelay
-    Show-Progress (++$i) $total 'TCP/IP...'; Set-Network
-    Show-Progress (++$i) $total 'Auto DNS...'; Set-AutoDns
-    Show-Progress (++$i) $total 'NDIS latency...'; Set-NetworkLatency
-    Show-Progress (++$i) $total 'Sticky Keys...'; Disable-StickyKeys
-    Show-Progress (++$i) $total 'Visual FX off...'; Disable-VisualFX
-    Show-Progress (++$i) $total 'SSD...'; Set-SSDTweaks
-    Show-Progress (++$i) $total 'Edge...'; Disable-EdgePreload
-    Show-Progress (++$i) $total 'WU drivers...'; Disable-WUDriverUpdates
-    Show-Progress (++$i) $total 'MSI...'; Set-MsiMode
-    Show-Progress (++$i) $total 'Uslugi...'; Disable-BaseSvc
-    Show-Progress (++$i) $total 'WU pause...'; Pause-WU
-    Show-Progress (++$i) $total 'Powiadomienia...'; Disable-AllNotifications
-    Show-Progress (++$i) $total 'Konserwacja...'; Disable-Maintenance
-    Show-Progress (++$i) $total 'HAGS...'; Set-Hags
-    Show-Progress (++$i) $total 'Fullscreen...'; Disable-FullscreenOpt
-    Show-Progress (++$i) $total 'Widgety...'; Disable-WidgetsCopilot
-    Show-Progress (++$i) $total 'MemoryComp...'; if($script:Hw -and $script:Hw.RamGB -ge 16){ Disable-MemoryCompression } else { Write-Info 'RAM <16GB pomijam' }
-    Show-Progress (++$i) $total 'HPET...'; Disable-HpetGlobally
-    Show-Progress (++$i) $total 'Cache...'; Clear-Shaders
-    Show-Progress (++$i) $total 'RAM...'; Clear-Ram
-    Show-Progress (++$i) $total 'Smart ISLC...'; Invoke-SmartISLC
-    Show-Progress (++$i) $total 'ProBalance...'; Invoke-ProBalance
-    Add-Applied 'profile-advanced'; Save-State
-    Show-Progress $total $total 'Gotowe ADVANCED!'
-    Write-Host ''; Write-Ok 'PROFIL ADVANCED zastosowany!'
-    Wait-Enter
+    if (-not (Assert-Premium -Feature 'Profil ADVANCED')) { Wait-Enter; return }
+    Write-Step 'PROFIL ADVANCED (wymaga PREMIUM, online)'
+    Ensure-Backup
+    Invoke-ProfileBalancedSafe
+    Set-MsiMode
+    Set-Hags
+    Set-NetworkLatency
+    Invoke-ProBalance
+    Write-Ok 'Profil ADVANCED zakonczony.'
+}
+
+function Invoke-ProfileBalancedSafe {
+    Set-Power 'HighPerformance'; Set-Network; Set-AutoDns; Set-MouseFix
+    Disable-VisualFX; Disable-WidgetsCopilot; Set-Mmcss; Set-Priority
 }
 function Invoke-FullProfile {
-    Write-Step 'PROFIL GAMINGOWY PELNY 1-CLICK'
-    if(-not $script:Licensed){ Write-Err 'Tylko w pelnej wersji!'; return }
-    $total=43; $i=0
-    Show-Progress (++$i) $total 'Backup + Restore Point...'; Ensure-Backup
-    Show-Progress (++$i) $total 'Plan Ultimate...'; Enable-Ultimate
-    Show-Progress (++$i) $total 'Hibernacja off...'; Disable-Hibernation
-    Show-Progress (++$i) $total 'MMCSS...'; Set-Mmcss
-    Show-Progress (++$i) $total 'Priorytety...'; Set-Priority
-    Show-Progress (++$i) $total 'CPU MaxPerf...'; Set-MaxPerf
-    Show-Progress (++$i) $total 'Timer 0.5ms...'; Set-Timer05
-    Show-Progress (++$i) $total 'Core Parking off...'; Disable-CoreParking
-    Show-Progress (++$i) $total 'CPU low-latency...'; Set-CstateOff
-    Show-Progress (++$i) $total 'USB Suspend off...'; Disable-USBSelectiveSuspend
-    Show-Progress (++$i) $total 'Mouse fix...'; Set-MouseFix
-    Show-Progress (++$i) $total 'Mouse menu delay...'; Set-MouseMenuDelay
-    Show-Progress (++$i) $total 'TCP/IP...'; Set-Network
-    Show-Progress (++$i) $total 'Auto DNS...'; Set-AutoDns
-    Show-Progress (++$i) $total 'NDIS latency...'; Set-NetworkLatency
-    Show-Progress (++$i) $total 'Sticky Keys off...'; Disable-StickyKeys
-    Show-Progress (++$i) $total 'Visual FX off...'; Disable-VisualFX
-    Show-Progress (++$i) $total 'SSD tweaks...'; Set-SSDTweaks
-    Show-Progress (++$i) $total 'Edge preload off...'; Disable-EdgePreload
-    Show-Progress (++$i) $total 'WU sterowniki...'; Disable-WUDriverUpdates
-    Show-Progress (++$i) $total 'MSI Mode...'; Set-MsiMode
-    Show-Progress (++$i) $total 'Uslugi...'; Disable-BaseSvc
-    Show-Progress (++$i) $total 'WU Pause...'; Pause-WU
-    Show-Progress (++$i) $total 'Telemetria...'; Disable-TelemetryHosts
-    Show-Progress (++$i) $total 'Powiadomienia off...'; Disable-AllNotifications
-    Show-Progress (++$i) $total 'Konserwacja off...'; Disable-Maintenance
-    Show-Progress (++$i) $total 'Delivery Optimization...'; Disable-DeliveryOptimization
-    Show-Progress (++$i) $total 'Defender wykluczenia...'; Add-GameDefenderExclusions
-    Show-Progress (++$i) $total 'HAGS...'; Set-Hags
-    Show-Progress (++$i) $total 'Fullscreen Opt off...'; Disable-FullscreenOpt
-    Show-Progress (++$i) $total 'Widgety/Copilot off...'; Disable-WidgetsCopilot
-    if($script:Hw -and $script:Hw.RamGB -ge 16){ Show-Progress (++$i) $total 'Memory Compression...'; Disable-MemoryCompression } else { ++$i }
-    Show-Progress (++$i) $total 'HPET off...'; Disable-HpetGlobally
-    Show-Progress (++$i) $total 'Reserved Storage off...'; Disable-ReservedStorage
-    if((Get-CimInstance Win32_OperatingSystem).BuildNumber -ge 22000){ Show-Progress (++$i) $total 'Win11 context...'; Disable-Win11Context } else { ++$i }
-    if($script:Hw){ if($script:Hw.GpuVendor -eq 'NVIDIA'){Set-Nvidia;Set-NvidiaShaderCache} elseif($script:Hw.GpuVendor -eq 'AMD'){Set-Amd} }
-    Show-Progress (++$i) $total 'Discord accel off...'; Disable-DiscordAccel
-    Show-Progress (++$i) $total 'Cache...'; Clear-Shaders
-    Show-Progress (++$i) $total 'RAM...'; Clear-Ram
-    Show-Progress (++$i) $total 'Smart ISLC w tle...'; Invoke-SmartISLC
-    Show-Progress (++$i) $total 'ProBalance Watcher...'; Invoke-ProBalance
-    Show-Progress (++$i) $total 'Game Priority...'; Invoke-GamePriorityWatcher
-    Show-Progress (++$i) $total 'Autostart...'; Set-AutostartGame
-    Show-Progress (++$i) $total 'Zapis...'; Add-Applied 'profile-full'; Save-State
-    Show-Progress $total $total 'Gotowe!'
-    Write-Host ''; Write-Ok 'PROFIL GAMINGOWY ZASTOSOWANY!'
-    Write-Info 'ZALECANY RESTART komputera.'
-    Wait-Enter
+    if (-not (Assert-Premium -Feature 'Profil FULL')) { Wait-Enter; return }
+    Write-Step 'PROFIL FULL (wymaga PREMIUM, online)'
+    Ensure-Backup
+    Invoke-ProfileBalancedSafe
+    Set-MsiMode; Set-Hags; Set-NetworkLatency; Invoke-ProBalance
+    Invoke-GamePriorityWatcher; Invoke-SmartISLC
+    Disable-Win11Context; Disable-ReservedStorage
+    Write-Ok 'Profil FULL zakonczony (bezpieczne tweaki; cofniecie: opcja 16).'
 }
 
 # ====================== DIAG ======================
 function New-Diag {
+    $lic = Test-D01iLicense
+    Write-Host ("   Licencja: " + $(if ($lic.valid) { "OK ($($lic.type))" } else { "BRAK/Offline ($($lic.reason))" })) -ForegroundColor $(if ($lic.valid) {'Green'} else {'Yellow'})
+
     Write-Step 'Raport diagnostyczny'
     $file = Join-Path $script:Root ("d01i_diag_$(Get-Date -Format yyyyMMdd_HHmmss).txt")
     $lines=@()
     $lines += "d01i tweakz p - RAPORT $(Get-Date)"
     $lines += ('='*60)
     $lines += "HWID: $script:Hwid"
-    $licStatus = 'DEMO'
-    if ($script:Licensed) {
-        if ($script:LicenseExpires.Year -ge 2099 -or $script:LicenseExpires -eq [datetime]::MaxValue) { $licStatus = 'PERMANENTNA' }
-        else { $licStatus = "wazna do $($script:LicenseExpires.ToString('yyyy-MM-dd'))" }
-    }
+    $licStatus = if ($lic.valid) { "OK $($lic.type), wygasa $($lic.license.expires_at)" } else { "BRAK/Offline ($($lic.reason))" }
     $lines += "Licencja: $licStatus"
     $lines += ''
     if($script:Hw){
@@ -2052,12 +1419,11 @@ function Show-Menu {
 
     Write-MenuCategory "PROFILE SZYBKIE  •  1-CLICK" "Cyan"
     Row2 'S' 'SAFE - bezpieczny' 'Green' 'B' 'BALANCED - polecany 90%' 'Green'
-    Row2 'A' 'ADVANCED - zaawansowany' 'Yellow' 'F' 'FULL - pelny (43 kroki)' 'Green'
+    Row2 'A' 'ADVANCED - zaawansowany (PREMIUM)' 'Yellow' 'F' 'FULL - pelny (PREMIUM)' 'Green'
     Row2 '01' 'FULL alias 01 - ULTIMATE' 'Green' '' '' 'White'
     Write-Host ""
 
     Write-MenuCategory "PODSTAWOWE" "DarkCyan"
-    Row2 '02' 'KILL MODE + RAM clean' 'White' '07' 'Czyszczenie cache/RAM' 'White'
     Row2 '08' 'SELF-TEST' 'Magenta' '09' 'Raport diagnostyczny' 'Cyan'
     Row2 '15' 'Kopiuj HWID' 'White' '' '' 'White'
     Write-Host ""
@@ -2077,14 +1443,6 @@ function Show-Menu {
     Write-Host ""
 
     Write-MenuCategory "PRYWATNOŚĆ & SYSTEM" "DarkCyan"
-    Row2 '22' 'Menu delay 0ms' 'White' '23' 'Telemetria OFF' 'White'
-    Row2 '24' 'Defender excl.' 'White' '25' 'Powiadomienia OFF' 'White'
-    Row2 '26' 'Konserwacja OFF' 'White' '32' 'Delivery Opt OFF' 'White'
-    Write-Host ""
-
-    Write-MenuCategory "ZAAWANSOWANE  •  RYZYKO" "Yellow"
-    Row2 '06' 'VBS/HVCI OFF' 'Yellow' '10' 'Spectre OFF (ryzyko)' 'DarkYellow'
-    Row2 '27' 'Blokada WU trwala' 'Yellow' '28' 'Tryb AGRESYWNY' 'DarkRed'
     Write-Host ""
 
     Write-MenuCategory "SYSTEM" "DarkCyan"
@@ -2110,8 +1468,6 @@ if ($AutoRun) {
             Write-Log 'Auto-run pomiety: brak waznej lokalnej licencji.' 'WARN'
             exit 0
         }
-        try { [D01i.Native]::SetTimer05() | Out-Null } catch {}
-        Invoke-KillMode
         Invoke-SmartISLC
         Invoke-ProBalance
         Invoke-GamePriorityWatcher
@@ -2137,43 +1493,31 @@ do {
     Show-Banner; Show-Hw; Show-Menu
     $c = (Read-Host '  Wybierz').Trim()
     switch ($c) {
-        'S'  { if($script:Licensed){ Invoke-ProfileSafe } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        'B'  { if($script:Licensed){ Invoke-ProfileBalanced } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        'A'  { if($script:Licensed){ Invoke-ProfileAdvanced } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        'F'  { if($script:Licensed){ Invoke-FullProfile } else { Enable-Ultimate; Wait-Enter } }
-        '01' { if($script:Licensed){ Invoke-FullProfile } else { Enable-Ultimate; Wait-Enter } }
-        '02' { Invoke-KillMode; Wait-Enter }
-        '03' { if($script:Licensed){Set-MouseFix}else{Write-Err 'Tylko pelna wersja.'}; Wait-Enter }
-        '04' { if($script:Licensed){Set-Network;Set-AutoDns}else{Write-Err 'Tylko pelna wersja.'}; Wait-Enter }
-        '05' { if($script:Licensed){Set-Hags;Set-MsiMode;Clear-Shaders;if($script:Hw){if($script:Hw.GpuVendor -eq 'NVIDIA'){Set-Nvidia}elseif($script:Hw.GpuVendor -eq 'AMD'){Set-Amd}} }else{Write-Err 'Tylko pelna wersja.'}; Wait-Enter }
-        '06' { Disable-Vbs; Wait-Enter }
-        '07' { Clear-Shaders; Clear-Ram; Wait-Enter }
+        'S'  { if(Assert-Premium){ Invoke-ProfileSafe } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        'B'  { if(Assert-Premium){ Invoke-ProfileBalanced } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        'A'  { if(Assert-Premium){ Invoke-ProfileAdvanced } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        'F'  { if(Assert-Premium){ Invoke-FullProfile } else { Invoke-ProfileSafe; Wait-Enter } }
+        '01' { if(Assert-Premium){ Invoke-FullProfile } else { Invoke-ProfileSafe; Wait-Enter } }
+        '03' { if(Assert-Premium){Set-MouseFix}; Wait-Enter }
+        '04' { if(Assert-Premium){Set-Network;Set-AutoDns}; Wait-Enter }
+        '05' { if(Assert-Premium){Set-Hags;Set-MsiMode;if($script:Hw){if($script:Hw.GpuVendor -eq 'NVIDIA'){Set-Nvidia}elseif($script:Hw.GpuVendor -eq 'AMD'){Set-Amd}} }; Wait-Enter }
         '08' { Invoke-SelfTest }
         '09' { New-Diag }
-        '10' { if($script:Licensed){ Disable-SpectreMeltdown; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '11' { if($script:Licensed){ Ensure-Backup; Set-NetworkLatency; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '11' { if(Assert-Premium){ Ensure-Backup; Set-NetworkLatency; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
         '12' { Invoke-SmartISLC; Wait-Enter }
         '13' { Test-NetworkPing }
-        '29' { if($script:Licensed){ Set-CstateOff; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '30' { if($script:Licensed){ Disable-DiscordAccel; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '31' { if($script:Licensed){ Set-NvidiaShaderCache; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '32' { if($script:Licensed){ Disable-DeliveryOptimization; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '33' { if($script:Licensed){ Invoke-ProBalance; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '30' { if(Assert-Premium){ Disable-DiscordAccel; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '31' { if(Assert-Premium){ Set-NvidiaShaderCache; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '32' { if(Assert-Premium){ Disable-DeliveryOptimization; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '33' { if(Assert-Premium){ Invoke-ProBalance; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
         '14' { Set-GameServerPing }
         '15' { Copy-HwidToClipboard; Wait-Enter }
         '16' { Invoke-Undo; Wait-Enter }
-        '17' { if($script:Licensed){ Disable-VisualFX; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '18' { if($script:Licensed){ Set-MaxPerf; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '19' { if($script:Licensed){ Invoke-GamePriorityWatcher; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '17' { if(Assert-Premium){ Disable-VisualFX; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '19' { if(Assert-Premium){ Invoke-GamePriorityWatcher; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
         '20' { Disable-Win11Context; Disable-ReservedStorage; Wait-Enter }
-        '21' { if($script:Licensed){ Set-AutostartGame } else { Write-Err 'Tylko pelna wersja.' }; Wait-Enter }
-        '22' { if($script:Licensed){ Set-MouseMenuDelay; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '23' { if($script:Licensed){ Disable-TelemetryHosts; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '24' { if($script:Licensed){ Add-GameDefenderExclusions; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '25' { if($script:Licensed){ Disable-AllNotifications; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '26' { if($script:Licensed){ Disable-Maintenance; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '27' { if($script:Licensed){ Block-WU-Completely; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '28' { if($script:Licensed){ Invoke-AggressiveMode; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '21' { if(Assert-Premium){ Set-AutostartGame } else { Write-Err 'Tylko pelna wersja.' }; Wait-Enter }
+        '22' { if(Assert-Premium){ Set-MouseMenuDelay; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
         '0'  { }
         default { Write-Warn 'Zla opcja.'; Start-Sleep -Milliseconds 500 }
     }

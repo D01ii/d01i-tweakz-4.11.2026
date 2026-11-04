@@ -1,6 +1,6 @@
 # Raport testów — D01i Tweakz Backend
 
-**Ostatnie uruchomienie:** 2026-11-04, runda 4 audytu
+**Ostatnie uruchomienie:** 2026-11-04, runda 5 — 5 kolejnych przebiegów, wszystkie 53/53 PASS
 **Środowisko:** Node.js v22.22.3 · PostgreSQL 16.2 (embedded, pgserver) · Debian 12 sandbox · 2 CPU
 **Dokładna komenda:**
 ```bash
@@ -9,9 +9,19 @@ ARGON2_MEMORY_COST=19456 ARGON2_TIME_COST=2 node --test --test-concurrency=1 "te
 ```
 (ARGON2_* tylko skraca testy; produkcja używa 64 MB/3 — Argon2id.)
 
-## Wynik: 53 / 53 PASS, 0 FAIL
+## Wynik (Runda 5, 2026-11-04): 5 przebiegów × 53/53 PASS, 0 FAIL
 
-Surowy wynik (stdout):
+Każdy przebieg osobno (stdout `node --test`):
+
+| Przebieg | # tests | # pass | # fail |
+|---|---|---|---|
+| 1 | 53 | 53 | 0 |
+| 2 | 53 | 53 | 0 |
+| 3 | 53 | 53 | 0 |
+| 4 | 53 | 53 | 0 |
+| 5 | 53 | 53 | 0 |
+
+Surowy wynik pojedynczego przebiegu:
 ```
 # tests 53
 # pass 53

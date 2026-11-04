@@ -800,22 +800,7 @@ function Disable-MiscServices {
     Add-D01Applied 'svc-misc' 'Usługi: Maps/Retail/Fax/WMP/DoSvc wyłączone'
 }
 
-function Disable-WindowsSearch {
-    Write-Step 'Usługa: Windows Search (indeksowanie)'
-    Write-Warn 'Po wyłączeniu wyszukiwanie w menu Start/eksploratorze nadal działa, ale będzie WOLNIEJSZE (bez indeksu).'
-    if ($script:DryRun) { Write-Info '[DRY-RUN] WSearch: Automatic -> Disabled'; return }
-    Set-D01Service -Name 'WSearch' -Startup Disabled -Desc 'Windows Search / indeksowanie plików'
-    Add-D01Applied 'svc-wsearch' 'Windows Search wyłączone'
-}
 
-function Suspend-WindowsUpdate {
-    Write-Step 'Usługa: Windows Update w tle (wstrzymanie na czas grania)'
-    Write-Warn 'System przestanie pobierać/instalować aktualizacje W TLE. Pamiętaj, by czasem wznowić usługę (menu 3 -> [7]).'
-    Set-D01Service -Name 'wuauserv' -Startup Disabled -Desc 'Windows Update (wstrzymany przez d01i)'
-    Set-D01Service -Name 'DoSvc'    -Startup Disabled -Desc 'Optymalizacja dostarczania'
-    Set-D01Task -FullName '\Microsoft\Windows\WindowsUpdate\Scheduled Start' -Action Disable
-    Add-D01Applied 'svc-wu-paused' 'Windows Update wstrzymany'
-}
 
 function Resume-WindowsUpdate {
     Write-Step 'Usługa: Windows Update - wznowienie'
@@ -1146,35 +1131,6 @@ function Get-ReBarStatus {
     Write-Info 'Szczegóły: d01i_bios_manual.md, sekcja 6.'
 }
 
-function Clear-ShaderCaches {
-    Write-Step 'GPU: czyszczenie cache shaderów'
-    $paths = @(
-        (Join-Path $env:LOCALAPPDATA 'NVIDIA\DXCache'),
-        (Join-Path $env:LOCALAPPDATA 'NVIDIA\GLCache'),
-        (Join-Path $env:LOCALAPPDATA 'NVIDIA Corporation\NV_Cache'),
-        (Join-Path $env:LOCALAPPDATA 'AMD\DxCache'),
-        (Join-Path $env:LOCALAPPDATA 'AMD\GLCache'),
-        (Join-Path $env:LOCALAPPDATA 'D3DSCache')
-    )
-    $totalMB = 0
-    foreach ($p in $paths) {
-        if (Test-Path $p) {
-            $size = 0
-            try { $size = [math]::Round(((Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1MB), 1) } catch { }
-            if ($script:DryRun) { Write-Info ("[DRY-RUN] Czyszczenie: {0} ({1} MB)" -f $p, $size); continue }
-            try {
-                Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
-                Write-Ok ("Wyczyszczono: {0} ({1} MB)" -f $p, $size)
-                $totalMB += $size
-            } catch { Write-Warn ("{0}: {1}" -f $p, $_.Exception.Message) }
-        }
-    }
-    if (-not $script:DryRun) {
-        Write-Ok ("Cache shaderów wyczyszczony. Zwolniono ok. {0} MB." -f [math]::Round($totalMB,1))
-        Write-Info 'Pierwsze uruchomienie gier po czyszczeniu może trochę trwać (shadery skompilują się od nowa - potem będzie gładko).'
-    }
-    Add-D01Applied 'gpu-shadercache' ("Cache shaderów: {0} MB" -f $totalMB)
-}
 
 function Disable-NvidiaBackground {
     Write-Step 'NVIDIA: ograniczanie procesów w tle'
@@ -1207,7 +1163,6 @@ function Invoke-Profile {
     param([string]$ProfileId)
     Write-Step ("PROFIL: {0}" -f $ProfileId)
     Write-Host '  Profil zastosuje sprawdzony zestaw: zasilanie + rejestr (MMCSS/priorytety/GameDVR) +' -ForegroundColor DarkGray
-    Write-Host '  usługi bazowe + zadania + Nagle off + QoS limit + HAGS + czyszczenie cache shaderów.' -ForegroundColor DarkGray
     Write-Host '  Sekcja ZAAWANSOWANA (VBS itd.) oraz DEBLOAT NIE są częścią profilu - uruchamiasz je świadomie z menu.' -ForegroundColor DarkGray
     Write-Host ''
     if (-not (Read-YesNo 'Zastosować profil teraz?')) { Write-Info 'Anulowano.'; return }
@@ -1242,12 +1197,10 @@ function Invoke-Profile {
     Set-MmcssGaming
     Set-PrioritiesPack
     Invoke-ServiceBasePack
-    Suspend-WindowsUpdate
     Disable-Nagle
     Set-QosBandwidth
     Disable-NicPowerSaving
     Enable-Hags
-    Clear-ShaderCaches
 
     if ($null -ne $script:Hw) {
         if ($script:Hw.GpuVendor -eq 'NVIDIA') { Disable-NvidiaBackground }
@@ -1278,34 +1231,6 @@ function Show-VbsStatus {
     }
 }
 
-function Disable-Vbs {
-    Write-Step 'WYŁĄCZANIE VBS / HVCI (Core Isolation)'
-    Write-Host ''
-    Write-Host '  !! OSTRZEŻENIE BEZPIECZEŃSTWA !!' -ForegroundColor Red
-    Write-Host '  Wyłączenie VBS/HVCI obniża odporność systemu na ataki (m.in. na sterowniki' -ForegroundColor Yellow
-    Write-Host '  i kradzież poświadczeń). Na maszynie wyłącznie do gier zysk bywa odczuwalny,' -ForegroundColor Yellow
-    Write-Host '  ale jeśli używasz tego komputera do bankowości/pracy - NIE rób tego.' -ForegroundColor Yellow
-    Write-Host '  Zmiana jest odwracalna (opcja [3] w tej sekcji). Wymagany restart.' -ForegroundColor Yellow
-    Write-Host ''
-    $code = Read-Host '  Aby potwierdzić, wpisz dokładnie: WYLACZ'
-    if ($code.Trim().ToUpper() -ne 'WYLACZ') { Write-Info 'Anulowano.'; return }
-
-    Show-VbsStatus
-    Set-D01Reg -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard' -Name 'EnableVirtualizationBasedSecurity' -Value 0 -Desc 'VBS OFF'
-    Set-D01Reg -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -Name 'Enabled' -Value 0 -Desc 'HVCI / Memory Integrity OFF'
-    Set-D01Reg -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\CredentialGuard' -Name 'Enabled' -Value 0 -Desc 'Credential Guard OFF'
-
-    if ($script:DryRun) {
-        Write-Info '[DRY-RUN] bcdedit /set {current} hypervisorlaunchtype off'
-    } else {
-        & bcdedit.exe /set '{current}' hypervisorlaunchtype off 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { Write-Ok 'Hypervisor launch: OFF' } else { Write-Warn 'bcdedit zwrócił błąd (Hyper-V może być nadal aktywny).' }
-        $script:State.VbsDisabled = $true; Save-D01State
-    }
-    $script:RebootNeeded = $true
-    Add-D01Applied 'adv-vbs-off' 'VBS/HVCI wyłączone (świadoma zgoda)'
-    Write-Warn 'Wymagany PEŁNY restart komputera. Po restarcie sprawdź status opcją [1].'
-}
 
 function Enable-Vbs {
     Write-Step 'WŁĄCZANIE ponowne VBS / HVCI'
@@ -1323,26 +1248,7 @@ function Enable-Vbs {
     Write-Info 'Po restarcie włącz Izolację rdzenia w: Zabezpieczenia Windows -> Zabezpieczenia urządzenia.'
 }
 
-function Disable-SysMain {
-    Write-Step 'SysMain (Superfetch) - wyłączenie'
-    if ($null -ne $script:Hw -and -not $script:Hw.IsSSD) {
-        Write-Warn 'Wykryto dysk HDD - SysMain wyłącza się raczej tylko na SSD/NVMe.'
-        if (-not (Read-YesNo 'Zastosować mimo to?')) { return }
-    }
-    Set-D01Service -Name 'SysMain' -Startup Disabled -Desc 'Superfetch wyłączony (SSD)'
-    Add-D01Applied 'adv-sysmain' 'SysMain wyłączony'
-}
 
-function Disable-ScheduledDefrag {
-    Write-Step 'Zaplanowana defragmentacja - wyłączenie'
-    if ($null -ne $script:Hw -and -not $script:Hw.IsSSD) {
-        Write-Warn 'Na HDD regularna defragmentacja jest POTRZEBNA. Przerywam.'
-        return
-    }
-    Write-Warn 'To samo zadanie wykonuje cykliczny TRIM. Rozważ ręczne "Optimize drives" raz na miesiąc.'
-    Set-D01Task -FullName '\Microsoft\Windows\Defrag\ScheduledDefrag' -Action Disable
-    Add-D01Applied 'adv-defrag' 'ScheduledDefrag wyłączony (SSD)'
-}
 
 function Set-PagefileMenu {
     Write-Step 'Plik strony (pagefile)'
@@ -1624,8 +1530,6 @@ function Menu-Services {
         Write-Host '   [1] Telemetria i diagnostyka (DiagTrack, zadania CEIP...)                [bezpieczne]' -ForegroundColor White
         Write-Host '   [2] Usługi Xbox / Game Bar w tle                                          [bezpieczne*]' -ForegroundColor White
         Write-Host '   [3] Inne: Mapy, Retail Demo, Fax, WMP, Delivery Optimization              [bezpieczne]' -ForegroundColor White
-        Write-Host '   [4] Windows Search (indeksowanie) - OFF                                   [opcjonalne]' -ForegroundColor White
-        Write-Host '   [5] Windows Update w tle - wstrzymaj na czas grania                       [opcjonalne]' -ForegroundColor White
         Write-Host '   [6] ZASTOSUJ ZESTAW BAZOWY (1+2+3)                                        [polecane]' -ForegroundColor Green
         Write-Host '   [7] Wznów Windows Update (przywróć ręczną kontrolę)' -ForegroundColor White
         Write-Host '   [8] Przywróć WSZYSTKIE usługi i zadania do stanu fabrycznego' -ForegroundColor White
@@ -1636,8 +1540,6 @@ function Menu-Services {
             '1' { Disable-TelemetryServices; Wait-Enter }
             '2' { Disable-XboxServices; Wait-Enter }
             '3' { Disable-MiscServices; Wait-Enter }
-            '4' { Disable-WindowsSearch; Wait-Enter }
-            '5' { Suspend-WindowsUpdate; Wait-Enter }
             '6' { Invoke-ServiceBasePack; Wait-Enter }
             '7' { Resume-WindowsUpdate; Wait-Enter }
             '8' { Restore-ServicesDefault; Enable-TelemetryTasks; Wait-Enter }
@@ -1705,7 +1607,6 @@ function Menu-Gpu {
         Write-Host '   [1] HAGS - włącz Hardware-Accelerated GPU Scheduling' -ForegroundColor White
         Write-Host '   [2] HAGS - przywróć domyślne' -ForegroundColor White
         Write-Host '   [3] Re-Size BAR / SAM - sprawdź status + jak włączyć (BIOS)' -ForegroundColor White
-        Write-Host '   [4] Wyczyść cache shaderów (NVIDIA/AMD/DirectX)' -ForegroundColor White
         Write-Host '   [5] NVIDIA: wyłącz procesy w tle (telemetria, kontener)' -ForegroundColor White
         Write-Host '   [6] AMD: usługa External Events -> Manual' -ForegroundColor White
         Write-Host '   [0] Powrót' -ForegroundColor White
@@ -1714,7 +1615,6 @@ function Menu-Gpu {
             '1' { Enable-Hags; Wait-Enter }
             '2' { Disable-Hags; Wait-Enter }
             '3' { Get-ReBarStatus; Wait-Enter }
-            '4' { Clear-ShaderCaches; Wait-Enter }
             '5' {
                 if ($vendor -ne 'NVIDIA') { Write-Warn 'Nie wykryto GPU NVIDIA - kontynuuję tylko na wyraźne życzenie.'; if (-not (Read-YesNo 'Na pewno?')) { Wait-Enter; continue } }
                 Disable-NvidiaBackground; Wait-Enter
@@ -1766,10 +1666,7 @@ function Menu-Advanced {
         Show-Banner
         Show-Section '8) ZAAWANSOWANE - CZYTAJ OPISY, ZMIANY ODWRACALNE'
         Write-Host '   [1] Pokaż status VBS / HVCI / Core Isolation' -ForegroundColor White
-        Write-Host '   [2] WYŁĄCZ VBS + Memory Integrity  [! bezpieczeństwo, wymaga wpisania WYLACZ]' -ForegroundColor Yellow
         Write-Host '   [3] Włącz ponownie VBS / HVCI' -ForegroundColor White
-        Write-Host '   [4] SysMain (Superfetch): wyłącz   [tylko SSD/NVMe]' -ForegroundColor White
-        Write-Host '   [5] Zaplanowana defragmentacja: wyłącz   [tylko SSD/NVMe]' -ForegroundColor White
         Write-Host '   [6] Plik strony: zarządzany przez system / stały rozmiar' -ForegroundColor White
         Write-Host '   [0] Powrót' -ForegroundColor White
         Write-Host ''
@@ -1778,10 +1675,7 @@ function Menu-Advanced {
         $c = Read-Host '  Wybierz opcję'
         switch ($c) {
             '1' { Show-VbsStatus; Wait-Enter }
-            '2' { Disable-Vbs; Wait-Enter }
             '3' { Enable-Vbs; Wait-Enter }
-            '4' { Disable-SysMain; Wait-Enter }
-            '5' { Disable-ScheduledDefrag; Wait-Enter }
             '6' { Set-PagefileMenu; Wait-Enter }
             '0' { return }
             default { Write-Warn 'Nieznana opcja.'; Start-Sleep -Milliseconds 600 }
