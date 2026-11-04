@@ -1,0 +1,26 @@
+[Unit]
+Description=D01i Tweakz Backend (Node.js + Express + PostgreSQL)
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=d01i
+Group=d01i
+WorkingDirectory=/opt/d01i-tweakz
+EnvironmentFile=/etc/d01i-tweakz/.env
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=5
+# Twardnienie
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/d01i-tweakz /var/log/d01i-tweakz
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

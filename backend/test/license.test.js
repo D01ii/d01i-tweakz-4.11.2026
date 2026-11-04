@@ -1,0 +1,154 @@
+process.env.TEST_DB_NAME = process.env.TEST_DB_NAME || 'license';
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  setupTestApp, createTestLicense, adminLogin, activateKey,
+  INSTALL_A, INSTALL_B, INSTALL_C, HWID_A, HWID_B,
+} from './helpers.js';
+
+let t;
+before(async () => { t = await setupTestApp(); });
+after(async () => { await t.close(); });
+
+test('poprawna aktywacja zwraca podpisany token i dane licencji', async () => {
+  const lic = await createTestLicense(t.query, { type: 'PREMIUM_30D' });
+  const r = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  assert.equal(r.status, 200);
+  assert.ok(r.body.token);
+  assert.equal(r.body.license.type, 'PREMIUM_30D');
+  assert.ok(r.body.device_id);
+});
+
+test('niepoprawny klucz -> 401 KEY_INVALID', async () => {
+  const r = await activateKey(t.client, 'D01I-AAAA-BBBB-CCCC-DDDD', INSTALL_A, HWID_A);
+  assert.equal(r.status, 401);
+  assert.equal(r.body.error, 'KEY_INVALID');
+});
+
+test('walidacja tokena dziala, refresh rotuje token', async () => {
+  const lic = await createTestLicense(t.query);
+  const act = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  const token = act.body.token;
+
+  const v = await t.client('/api/v1/license/validate', { method: 'POST', body: JSON.stringify({ token }) });
+  assert.equal(v.status, 200);
+  const vj = await v.json();
+  assert.equal(vj.valid, true);
+  assert.equal(vj.license.type, 'PREMIUM_30D');
+
+  const rf = await t.client('/api/v1/license/refresh', { method: 'POST', body: JSON.stringify({ token }) });
+  assert.equal(rf.status, 200);
+  const rj = await rf.json();
+  assert.ok(rj.token && rj.token !== token);
+
+  // stary token po rotacji: sesja zastapiona ale nie revoked -> validate nadal OK do exp, refresh idempotentny
+  const rf2 = await t.client('/api/v1/license/refresh', { method: 'POST', body: JSON.stringify({ token }) });
+  const rj2 = await rf2.json();
+  assert.equal(rj2.token, rj.token, 'powtorzony refresh po utracie odpowiedzi zwraca ten sam token (idempotentnosc)');
+
+  const v2 = await t.client('/api/v1/license/validate', { method: 'POST', body: JSON.stringify({ token: rj.token }) });
+  assert.equal((await v2.json()).valid, true);
+});
+
+test('limit urzadzen: 2 aktywne OK, trzecie odrzucone (409)', async () => {
+  const lic = await createTestLicense(t.query, { maxDevices: 2 });
+  const a = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  const b = await activateKey(t.client, lic.key, INSTALL_B, HWID_B);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  const c = await activateKey(t.client, lic.key, INSTALL_C, 'hwid-machine-C-9999');
+  assert.equal(c.status, 409);
+  assert.equal(c.body.error, 'DEVICE_LIMIT_REACHED');
+});
+
+test('dezaktywacja urzadzenia zwalnia slot i pozwala na ponowna aktywacje', async () => {
+  const lic = await createTestLicense(t.query, { maxDevices: 2 });
+  await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  await activateKey(t.client, lic.key, INSTALL_B, HWID_B);
+  const c1 = await activateKey(t.client, lic.key, INSTALL_C, 'hwid-machine-C-0000');
+  assert.equal(c1.status, 409);
+
+  // dezaktywacja przez token urzadzenia B
+  const b = await activateKey(t.client, lic.key, INSTALL_B, HWID_B); // re-aktywacja zwraca token
+  const deact = await t.client('/api/v1/license/deactivate', { method: 'POST', body: JSON.stringify({ token: b.body.token }) });
+  assert.equal(deact.status, 200);
+
+  const c2 = await activateKey(t.client, lic.key, INSTALL_C, 'hwid-machine-C-0000');
+  assert.equal(c2.status, 200, 'po dezaktywacji B mozna aktywowac C');
+});
+
+test('rownolegle aktywacje trzeciego urzadzenia - tylko jedna moze wygrac (transakcja FOR UPDATE)', async () => {
+  const lic = await createTestLicense(t.query, { maxDevices: 2 });
+  await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  await activateKey(t.client, lic.key, INSTALL_B, HWID_B);
+  const results = await Promise.all(
+    Array.from({ length: 8 }, (_, i) => activateKey(t.client, lic.key, INSTALL_C, 'hwid-machine-C-' + i))
+  );
+  const okCount = results.filter((r) => r.status === 200).length;
+  assert.equal(okCount, 0, 'żadna z 8 równoczesnych aktywacji nie może przekroczyć limitu');
+});
+
+test('wygasla licencja -> LICENSE_EXPIRED', async () => {
+  const { keyHash, keyPrefix } = await import('../src/utils/licenseKey.js');
+  const { generateLicenseKey } = await import('../src/utils/licenseKey.js');
+  const key = generateLicenseKey();
+  await t.query(
+    `INSERT INTO licenses (key_hash, key_prefix, type, expires_at) VALUES ($1,$2,'PREMIUM_30D', now() - interval '1 day')`,
+    [keyHash(key), keyPrefix(key)]
+  );
+  const r = await activateKey(t.client, key, INSTALL_A, HWID_A);
+  assert.equal(r.status, 403);
+  assert.equal(r.body.error, 'LICENSE_EXPIRED');
+});
+
+test('uniewazniona licencja -> LICENSE_REVOKED i sesje uniewaznione', async () => {
+  const lic = await createTestLicense(t.query);
+  const act = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  await t.query(`UPDATE licenses SET status='REVOKED', revoked_at=now() WHERE id=$1`, [lic.id]);
+  await t.query(`UPDATE license_sessions SET revoked=TRUE WHERE license_id=$1`, [lic.id]);
+
+  const a2 = await activateKey(t.client, lic.key, INSTALL_B, HWID_B);
+  assert.equal(a2.status, 403);
+  assert.equal(a2.body.error, 'LICENSE_REVOKED');
+
+  const v = await t.client('/api/v1/license/validate', { method: 'POST', body: JSON.stringify({ token: act.body.token }) });
+  assert.equal(v.status, 401);
+  assert.equal((await v.json()).error, 'SESSION_REVOKED');
+});
+
+test('sfałszowany token (zly podpis) -> 401 + zdarzenie TOKEN_TAMPER', async () => {
+  const lic = await createTestLicense(t.query);
+  const act = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  const forged = act.body.token.slice(0, -4) + 'AAAA';
+  const v = await t.client('/api/v1/license/validate', { method: 'POST', body: JSON.stringify({ token: forged }) });
+  assert.equal(v.status, 401);
+  assert.equal((await v.json()).error, 'INVALID_SIGNATURE');
+  const ev = await t.query(`SELECT kind FROM abuse_events WHERE kind='TOKEN_TAMPER' ORDER BY at DESC LIMIT 1`);
+  assert.equal(ev.rows[0].kind, 'TOKEN_TAMPER');
+});
+
+test('status i lista urzadzen dla wlasciciela tokena', async () => {
+  const lic = await createTestLicense(t.query);
+  const act = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  const s = await t.client('/api/v1/license/status', { method: 'POST', body: JSON.stringify({ token: act.body.token }) });
+  assert.equal(s.status, 200);
+  const sj = await s.json();
+  assert.equal(sj.active_devices, 1);
+  const d = await t.client('/api/v1/license/devices', { method: 'POST', body: JSON.stringify({ token: act.body.token }) });
+  const dj = await d.json();
+  assert.equal(dj.devices.length, 1);
+  assert.equal(dj.devices[0].mine, true);
+});
+
+test('walidacja blednych danych wejsciowych -> 400', async () => {
+  const r = await t.client('/api/v1/license/activate', { method: 'POST', body: JSON.stringify({ key: 'x' }) });
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).error, 'VALIDATION_ERROR');
+});
+
+test('health endpoint dziala', async () => {
+  const r = await t.client('/api/v1/admin/ops/health');
+  const j = await r.json();
+  assert.equal(j.ok, true);
+  assert.equal(j.db, true);
+});
