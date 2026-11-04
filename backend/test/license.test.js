@@ -209,3 +209,51 @@ test('health endpoint dziala', async () => {
   assert.equal(j.ok, true);
   assert.equal(j.db, true);
 });
+
+test('R3-P1: rownolegla aktywacja tego samego install_id z roznymi HWID - bez duplikatu i bez 500', async () => {
+  const lic = await createTestLicense(t.query, { maxDevices: 2 });
+  const results = await Promise.all(
+    Array.from({ length: 6 }, (_, i) =>
+      activateKey(t.client, lic.key, INSTALL_A, 'hwid-race-' + i + '-xxxxx')
+    )
+  );
+  const statuses = results.map((r) => r.status).sort();
+  assert.ok(!statuses.includes(500), `brak 500, statusy: ${statuses}`);
+  const okCount = results.filter((r) => r.status === 200).length;
+  assert.ok(okCount <= 1, `maks. jedna aktywacja OK, otrzymano ${okCount}`);
+  const mismatch = results.filter((r) => r.status === 409 && r.body.error === 'HWID_MISMATCH').length;
+  assert.ok(mismatch >= 1, 'pozostale dostaly 409 HWID_MISMATCH');
+  const devCount = await t.query(`SELECT COUNT(*)::int AS n FROM devices WHERE license_id=$1 AND install_id=$2`, [lic.id, INSTALL_A]);
+  assert.equal(devCount.rows[0].n, 1, 'dokladnie jedno urzadzenie dla install_id (UNIQUE)');
+  // sprzatanie: test celowo generuje zdarzenia HWID_MISMATCH (auto-blokada IP) - cofamy blokade
+  const { liftBlock } = await import('../src/services/abuseService.js');
+  const bl = await t.query(`SELECT ip_hash FROM ip_blocks WHERE NOT lifted`);
+  for (const row of bl.rows) await liftBlock(row.ip_hash, null);
+});
+
+test('R3-P2: rotowany stary token nie tworzy nowej sesji (replay nie mintuje)', async () => {
+  const lic = await createTestLicense(t.query);
+  const act = await activateKey(t.client, lic.key, INSTALL_A, HWID_A);
+  const token = act.body.token;
+  const rf = await t.client('/api/v1/license/refresh', { method: 'POST', body: JSON.stringify({ token }) });
+  const rj = await rf.json();
+  assert.equal(rf.status, 200);
+  // kilka replayow starego tokena w oknie - wszystkie zwracaja TEGO SAMEGO nastepce
+  for (let i = 0; i < 3; i++) {
+    const rep = await t.client('/api/v1/license/refresh', { method: 'POST', body: JSON.stringify({ token }) });
+    const b = await rep.json();
+    assert.equal(rep.status, 200);
+    assert.equal(b.token, rj.token);
+  }
+  const sess = await t.query(
+    `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE NOT revoked)::int AS active FROM license_sessions WHERE device_id=$1`,
+    [act.body.device_id]
+  );
+  assert.equal(sess.rows[0].active, 1, 'nadal dokladnie jedna aktywna sesja');
+  assert.equal(sess.rows[0].total, 2, 'replay nie utworzyl nowych sesji (stara + nastepca)');
+  // stary token na innych endpointach -> 401
+  const v = await t.client('/api/v1/license/validate', { method: 'POST', body: JSON.stringify({ token }) });
+  assert.equal(v.status, 401);
+  const st = await t.client('/api/v1/license/status', { method: 'POST', body: JSON.stringify({ token }) });
+  assert.equal(st.status, 401);
+});

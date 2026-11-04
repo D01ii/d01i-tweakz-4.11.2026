@@ -110,16 +110,62 @@ export async function activate({ key, installId, hwid, label = null, ipHash = nu
         return { ok: false, code: 'DEVICE_LIMIT_REACHED', maxDevices: lic.max_devices };
       }
       const newId = randomUuid();
-      await client.query(
-        `INSERT INTO devices (id, license_id, install_id, hwid_hash, label) VALUES ($1,$2,$3,$4,$5)`,
-        [newId, lic.id, instId, hwidHash, label]
-      );
-      device = { id: newId, active: true };
-      await client.query(
-        `INSERT INTO activation_history (license_id, device_id, action, ip_hash, user_agent, meta)
-         VALUES ($1,$2,'ACTIVATE',$3,$4,$5)`,
-        [lic.id, device.id, ipHash, userAgent, JSON.stringify({ result: 'ok' })]
-      );
+      try {
+        await client.query(
+          `INSERT INTO devices (id, license_id, install_id, hwid_hash, label) VALUES ($1,$2,$3,$4,$5)`,
+          [newId, lic.id, instId, hwidHash, label]
+        );
+      } catch (err) {
+        // Runda 3, Problem 1: UNIQUE(license_id, install_id) to ostatnia linia obrony.
+        // Jesli mimo blokady licencji FOR UPDATE doszlo do naruszenia unikalnosci
+        // (np. w przyszlosci bez blokady), nie zwracamy 500 - traktujemy jak istniejace urzadzenie.
+        if (err.code === '23505') {
+          const again = await client.query(
+            `SELECT * FROM devices WHERE license_id = $1 AND install_id = $2 FOR UPDATE`,
+            [lic.id, instId]
+          );
+          if (again.rows.length) {
+            device = again.rows[0];
+            if (device.hwid_hash && device.hwid_hash !== hwidHash) {
+              await recordAbuse({ kind: 'DEVICE_HWID_MISMATCH', severity: 'high', ipHash, keyHash: kh, installId: instId, meta: { license_id: lic.id, device_id: device.id, race: true } });
+              return { ok: false, code: 'HWID_MISMATCH' };
+            }
+            if (!device.active) {
+              await client.query(
+                `UPDATE devices SET active = TRUE, deactivated_at = NULL, hwid_hash = COALESCE(hwid_hash, $2), last_seen_at = now() WHERE id = $1`,
+                [device.id, hwidHash]
+              );
+              device.active = true;
+            }
+            await client.query(
+              `INSERT INTO activation_history (license_id, device_id, action, ip_hash, user_agent, meta)
+               VALUES ($1,$2,'REACTIVATE',$3,$4,$5)`,
+              [lic.id, device.id, ipHash, userAgent, JSON.stringify({ result: 'race_existing_device' })]
+            );
+          } else {
+            throw err;
+          }
+        } else {
+          throw err;
+        }
+      }
+      if (!device) {
+        device = { id: newId, active: true };
+        await client.query(
+          `INSERT INTO activation_history (license_id, device_id, action, ip_hash, user_agent, meta)
+           VALUES ($1,$2,'ACTIVATE',$3,$4,$5)`,
+          [lic.id, device.id, ipHash, userAgent, JSON.stringify({ result: 'ok' })]
+        );
+        // Runda 3, Problem 1: ponowna kontrola limitu PO insertcie (defense in depth).
+        const afterCount = await client.query(
+          `SELECT COUNT(*)::int AS n FROM devices WHERE license_id = $1 AND active = TRUE`,
+          [lic.id]
+        );
+        if (afterCount.rows[0].n > lic.max_devices) {
+          await recordAbuse({ kind: 'DEVICE_LIMIT_EXCEEDED', severity: 'critical', ipHash, keyHash: kh, installId: instId, meta: { license_id: lic.id, active: afterCount.rows[0].n, max: lic.max_devices } });
+          throw new Error(`device limit exceeded after insert (${afterCount.rows[0].n} > ${lic.max_devices})`);
+        }
+      }
     }
 
     await client.query(`UPDATE devices SET last_seen_at = now() WHERE id = $1`, [device.id]);

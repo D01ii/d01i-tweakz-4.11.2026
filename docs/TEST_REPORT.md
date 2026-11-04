@@ -3,7 +3,7 @@
 **Data uruchomienia:** 2026-11-04 (po dwóch rundach audytu) · **Środowisko:** Node.js v22.22.3, PostgreSQL (instancja testowa), Debian sandbox
 **Polecenie:** `node --test --test-concurrency=1 "test/*.test.js"` (w `backend/`)
 
-## Wynik: 46 / 46 PASS, 0 FAIL (po drugiej rundzie audytu)
+## Wynik: 49 / 49 PASS, 0 FAIL (po trzech rundach audytu)
 
 ```
 # tests 46

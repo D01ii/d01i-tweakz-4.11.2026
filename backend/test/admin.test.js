@@ -234,3 +234,30 @@ test('recovery code przy rownoleglych probach logowania zuzywa sie ATOMOWO - tyl
   const after = await loginAdmin({ username: 'raceadmin', password: 'super-secret-password-123', recoveryCode: code });
   assert.equal(after.ok, false);
 });
+
+test('R3-P3: uniewazniona/wygasla/wylaczona sesja admina nie przechodzi autoryzacji', async () => {
+  const { cookieHeader, csrfToken } = await adminLogin(t.client, t.query, { username: 'sessadmin', password: 'super-secret-password-123' });
+  const api = authedClient(t.client, cookieHeader, csrfToken);
+  assert.equal((await api('/api/v1/admin/me')).status, 200, 'sesja aktywna dziala');
+
+  // 1) sesja uniewazniona bezposrednio w bazie (np. logout admina / disable)
+  const { sha256Hex } = await import('../src/utils/crypto.js');
+  const tokenHash = sha256Hex(cookieHeader.match(/d01i_admin_session=([^;]+)/)[1]);
+  await t.query(`UPDATE admin_sessions SET revoked=TRUE WHERE token_hash=$1`, [tokenHash]);
+  assert.equal((await api('/api/v1/admin/me')).status, 401, 'revoked -> 401');
+
+  // 2) sesja wygasla
+  const login2 = await adminLogin(t.client, t.query, { username: 'sessadmin2', password: 'super-secret-password-123' });
+  const api2 = authedClient(t.client, login2.cookieHeader, login2.csrfToken);
+  const th2 = sha256Hex(login2.cookieHeader.match(/d01i_admin_session=([^;]+)/)[1]);
+  await t.query(`UPDATE admin_sessions SET expires_at = now() - interval '1 hour' WHERE token_hash=$1`, [th2]);
+  assert.equal((await api2('/api/v1/admin/me')).status, 401, 'expired -> 401');
+
+  // 3) konto admina wylaczone przez superadmina -> wszystkie sesje 401
+  const login3 = await adminLogin(t.client, t.query, { username: 'sessadmin3', password: 'super-secret-password-123' });
+  const api3 = authedClient(t.client, login3.cookieHeader, login3.csrfToken);
+  const admin3 = (await t.query(`SELECT id FROM admins WHERE username='sessadmin3'`)).rows[0].id;
+  const { setAdminActive } = await import('../src/services/adminService.js');
+  await setAdminActive(admin3, false, null);
+  assert.equal((await api3('/api/v1/admin/me')).status, 401, 'konto wylaczone -> 401');
+});
