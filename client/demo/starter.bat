@@ -6,7 +6,7 @@ rem   d01i - universal  |  LAUNCHER
 rem   Uruchamia glowny skrypt PowerShell:
 rem     - wlacz kodowanie UTF-8 (poprawne logo ASCII)
 rem     - wymus uprawnienia Administratora (UAC)
-rem     - uruchom d01i_universal.ps1
+rem     - uruchom demo.ps1
 rem
 rem   Tryb podgladu (bez zapisu zmian - DRY-RUN):
 rem     d01i_universal.bat -DryRun
@@ -30,7 +30,7 @@ if %errorlevel% NEQ 0 (
 )
 
 rem --- jestesmy Adminem: odpal wlasciwy skrypt ------------------
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0d01i_universal.ps1" %*
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0demo.ps1" %*
 
 if %errorlevel% NEQ 0 (
     echo.

@@ -372,7 +372,7 @@ function Set-Reg {
             New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
         }
         Write-Ok "REG: $Name = $Value"
-    } catch { Write-Err "REG $Path $Name : $($_.Exception.Message)" }
+    } catch { Write-Err "REG $Path ${Name} : $($_.Exception.Message)" }
 }
 function Remove-Reg {
     [CmdletBinding()]
@@ -394,7 +394,7 @@ function Remove-Reg {
     try {
         Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop
         Write-Ok "REG: usunieto $Name"
-    } catch { Write-Err "REG $Path $Name : $($_.Exception.Message)" }
+    } catch { Write-Err "REG $Path ${Name} : $($_.Exception.Message)" }
 }
 function Set-Svc {
     [CmdletBinding()]
@@ -411,8 +411,8 @@ function Set-Svc {
     try {
         if ($Start -ne 'Automatic') { Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue }
         Set-Service -Name $Name -StartupType $Start -ErrorAction Stop
-        Write-Ok "SVC: $Name : $oldM -> $Start $(if($Desc){' | '+$Desc})"
-    } catch { Write-Err "SVC $Name : $($_.Exception.Message)" }
+        Write-Ok "SVC: ${Name} : $oldM -> $Start $(if($Desc){' | '+$Desc})"
+    } catch { Write-Err "SVC ${Name} : $($_.Exception.Message)" }
 }
 function Set-Task {
     [CmdletBinding()]
@@ -432,7 +432,7 @@ function Set-Task {
             $script:State.DisabledTasks = @($script:State.DisabledTasks -ne $Full); Save-State
             Write-Ok "TASK wlaczone: $n"
         }
-    } catch { Write-Warn "TASK $n : $($_.Exception.Message)" }
+    } catch { Write-Warn "TASK ${n} : $($_.Exception.Message)" }
 }
 function Get-BcdValue {
     param([string]$Setting)
@@ -568,7 +568,7 @@ function Enable-Ultimate {
         if (Set-Power -SubG $s.SubGroup -Setting $s.Setting -Val $s.Value -AcDc $s.AcDc) { $i++ }
     }
     & powercfg.exe /setactive $g 2>&1 | Out-Null
-    Write-Ok "Plan Ultimate aktywowany ($i ustawien)."
+    Write-Ok ("Plan Ultimate aktywowany ({0} ustawien)." -f $i)
     Add-Applied 'power-ultimate'
 }
 function Disable-Hibernation {
@@ -905,7 +905,7 @@ function Set-AutostartGame {
     if (-not $script:Licensed) { Write-Err 'Autostart wymaga aktywnej pelnej licencji.'; return }
     Ensure-Backup
 
-    $ps1Path = Join-Path $script:Root 'd01i_PRO.ps1'
+    $ps1Path = Join-Path $script:Root 'premium.ps1'
     if (-not (Test-Path -LiteralPath $ps1Path)) { Write-Err "Nie znaleziono skryptu: $ps1Path"; return }
     $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellExe)) { $powershellExe = 'powershell.exe' }
@@ -920,7 +920,7 @@ function Set-AutostartGame {
         Register-ScheduledTask -TaskName $script:AutoRunTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
 
         # Usuwamy stary launcher z folderu Startup; nie potrafil podniesc uprawnien po logowaniu.
-        $legacyBat = Join-Path ([Environment]::GetFolderPath('Startup')) 'd01i_PRO_autorun.bat'
+        $legacyBat = Join-Path ([Environment]::GetFolderPath('Startup')) 'd01i_premium_autorun.bat'
         Remove-Item -LiteralPath $legacyBat -Force -ErrorAction SilentlyContinue
         Write-Ok "Autostart zapisany jako zadanie Harmonogramu: $($script:AutoRunTaskName)"
         Write-Info 'Po logowaniu zadanie uruchomi ukryty, podniesiony proces dla timera, Smart ISLC, ProBalance i Game Priority.'
@@ -1253,7 +1253,7 @@ function Invoke-Undo {
 
     }
     try { Unregister-ScheduledTask -TaskName $script:AutoRunTaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-    Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Startup')) 'd01i_PRO_autorun.bat') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Startup')) 'd01i_premium_autorun.bat') -Force -ErrorAction SilentlyContinue
 
     if ($script:State.HibernationWasEnabled -eq $true) { & powercfg.exe /hibernate on 2>&1 | Out-Null }
     elseif ($script:State.HibernationWasEnabled -eq $false) { & powercfg.exe /hibernate off 2>&1 | Out-Null }
