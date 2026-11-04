@@ -14,7 +14,7 @@ $failed = $false
 
 try {
     Write-Host "[update] 1/6 Sprawdzanie aktualizacji..."
-    if (-not (Test-Path (Join-Path $SourceDir 'src'))) { throw "Brak kodu źródłowego w $SourceDir" }
+    if (-not (Test-Path (Join-Path $SourceDir 'src'))) { throw "Brak kodu zrodlowego w $SourceDir" }
     if (-not (Test-Path $EnvFile)) { throw "Brak $EnvFile - backend nie byl instalowany?" }
 
     Write-Host "[update] 2/6 Zatrzymywanie backendu (weryfikacja PID)..."
@@ -46,10 +46,10 @@ try {
     try { $r = Invoke-RestMethod "http://127.0.0.1:$Port/api/v1/admin/ops/health" -TimeoutSec 5; $ok = ($r.ok -and $r.db) } catch {}
     if (-not $ok) { throw "Healthcheck nieudany po aktualizacji" }
 
-    Write-Host "[update] OK - aktualizacja zakończona pomyślnie. Backup: $Backup" -ForegroundColor Green
+    Write-Host "[update] OK - aktualizacja zakonczona pomyslnie. Backup: $Backup" -ForegroundColor Green
 } catch {
     $failed = $true
-    Write-Host "[update][BŁĄD] $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[update][BLAD] $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "[update] Rollback do poprzedniej wersji..." -ForegroundColor Yellow
     try {
         & (Join-Path $PSScriptRoot 'Stop-Backend.ps1') -EnvFile $EnvFile -InstallDir $InstallDir
@@ -66,8 +66,8 @@ try {
         Write-Host "[update] Rollback zakonczony - poprzednia wersja probuje wystartowac. Sprawdz logi." -ForegroundColor Yellow
         Write-Host "[update] UWAGA: schemat bazy nie jest cofany automatycznie; w razie potrzeby przywroc baze recznie." -ForegroundColor Yellow
     } catch {
-        Write-Host "[update][KRYTYCZNY] Rollback tez sie nie powiódl: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "[update] Backend moze byc zatrzymany. Uruchom ręcznie: Start-Backend.ps1 i sprawdz $env:ProgramData\D01iTweakz\backend.err.log" -ForegroundColor Red
+        Write-Host "[update][KRYTYCZNY] Rollback tez sie nie powiodl: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[update] Backend moze byc zatrzymany. Uruchom recznie: Start-Backend.ps1 i sprawdz $env:ProgramData\D01iTweakz\backend.err.log" -ForegroundColor Red
     }
     exit 1
 }

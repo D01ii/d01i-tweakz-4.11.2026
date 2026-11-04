@@ -1,19 +1,19 @@
 ﻿<#
 ================================================================================
-  D01i Tweakz — moduł licencjonowania (WERSJA SERWEROWA, Runda 6)
+  D01i Tweakz - modul licencjonowania (WERSJA SERWEROWA, Runda 6)
 ================================================================================
   ZASADY:
-  - Serwer (backend) jest JEDYNYM źródłem prawdy o licencji.
-  - Klient NIE zawiera żadnych sekretów: ani klucza prywatnego Ed25519,
-    ani SECRET_ENC_KEY, ani lokalnego algorytmu generującego klucze.
-  - Brak internetu = brak autoryzacji do funkcji wymagających licencji
+  - Serwer (backend) jest JEDYNYM zrodlem prawdy o licencji.
+  - Klient NIE zawiera zadnych sekretow: ani klucza prywatnego Ed25519,
+    ani SECRET_ENC_KEY, ani lokalnego algorytmu generujacego klucze.
+  - Brak internetu = brak autoryzacji do funkcji wymagajacych licencji
     (STRICT ONLINE, bez grace period / trybu offline).
-  - Token sesji ma krótki TTL (domyślnie 120 s) i jest odświeżany przez
-    /api/v1/license/refresh; po wygaśnięciu tokena klient wykonuje ponowną
-    aktywację online zapamiętanym kluczem (chronionym DPAPI).
-  - Adres API konfiguruje użytkownik (D01I_API_BASE lub config.json) —
-    w kliencie NIE ma domyślnej przykładowej domeny.
-  - Zgodność: Windows PowerShell 5.1 (brak operatorów ?? ?: && || ?.)
+  - Token sesji ma krotki TTL (domyslnie 120 s) i jest odswiezany przez
+    /api/v1/license/refresh; po wygasnieciu tokena klient wykonuje ponowna
+    aktywacje online zapamietanym kluczem (chronionym DPAPI).
+  - Adres API konfiguruje uzytkownik (D01I_API_BASE lub config.json) -
+    w kliencie NIE ma domyslnej przykladowej domeny.
+  - Zgodnosc: Windows PowerShell 5.1 (brak operatorow ?? ?: && || ?.)
     oraz PowerShell 7.
 ================================================================================
 #>
@@ -27,7 +27,7 @@ $script:SidSystem = 'S-1-5-18'
 $script:SidAdmins = 'S-1-5-32-544'
 
 function Get-D01iApiBase {
-    <# Zwraca skonfigurowany adres API lub $null (brak konfiguracji). NIGDY nie zwraca przykładowej domeny. #>
+    <# Zwraca skonfigurowany adres API lub $null (brak konfiguracji). NIGDY nie zwraca przykladowej domeny. #>
     $raw = $env:D01I_API_BASE
     if (-not $raw -and (Test-Path $script:D01iConfigFile)) {
         try {
@@ -58,15 +58,15 @@ function Test-D01iApiBase {
 }
 
 function Get-D01iHwid {
-    <# Stabilny HWID = SHA-256(CPU ProcessorId | płyta SerialNumber | dysk fizyczny 0 SerialNumber), 16 znaków HEX.
-       Brak którejkolwiek danej = JAWNY BŁĄD (brak stałego HWID awaryjnego — wiele maszyn nie mogłoby współdzielić ID).
-       Nazwa komputera NIE jest częścią HWID. #>
+    <# Stabilny HWID = SHA-256(CPU ProcessorId | plyta SerialNumber | dysk fizyczny 0 SerialNumber), 16 znakow HEX.
+       Brak ktorejkolwiek danej = JAWNY BLAD (brak stalego HWID awaryjnego - wiele maszyn nie mogloby wspoldzielic ID).
+       Nazwa komputera NIE jest czescia HWID. #>
     $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
     $mb  = Get-CimInstance Win32_BaseBoard -ErrorAction Stop | Select-Object -First 1
     $disk = Get-CimInstance Win32_DiskDrive -ErrorAction Stop | Where-Object { $_.Index -eq 0 } | Select-Object -First 1
-    if (-not $cpu -or [string]::IsNullOrWhiteSpace([string]$cpu.ProcessorId)) { throw 'HWID: brak ProcessorId CPU — aktywacja niemozliwa.' }
-    if (-not $mb -or [string]::IsNullOrWhiteSpace([string]$mb.SerialNumber)) { throw 'HWID: brak SerialNumber plyty glownej — aktywacja niemozliwa.' }
-    if (-not $disk -or [string]::IsNullOrWhiteSpace([string]$disk.SerialNumber)) { throw 'HWID: brak SerialNumber dysku 0 — aktywacja niemozliwa.' }
+    if (-not $cpu -or [string]::IsNullOrWhiteSpace([string]$cpu.ProcessorId)) { throw 'HWID: brak ProcessorId CPU - aktywacja niemozliwa.' }
+    if (-not $mb -or [string]::IsNullOrWhiteSpace([string]$mb.SerialNumber)) { throw 'HWID: brak SerialNumber plyty glownej - aktywacja niemozliwa.' }
+    if (-not $disk -or [string]::IsNullOrWhiteSpace([string]$disk.SerialNumber)) { throw 'HWID: brak SerialNumber dysku 0 - aktywacja niemozliwa.' }
     $raw = "$($cpu.ProcessorId)|$($mb.SerialNumber)|$($disk.SerialNumber)"
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -76,10 +76,10 @@ function Get-D01iHwid {
 }
 
 function Get-D01iInstallId {
-    <# Stabilny identyfikator instalacji = SHA-256(MachineGuid). Trwały per maszyna; nie zmienia sie przy restarcie.
-       Brak MachineGuid = jawny błąd (nie generujemy losowego ID, które mogłoby zdradzić slot urządzenia). #>
+    <# Stabilny identyfikator instalacji = SHA-256(MachineGuid). Trwaly per maszyna; nie zmienia sie przy restarcie.
+       Brak MachineGuid = jawny blad (nie generujemy losowego ID, ktore mogloby zdradzic slot urzadzenia). #>
     $mg = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid
-    if ([string]::IsNullOrWhiteSpace([string]$mg)) { throw 'Brak MachineGuid — identyfikator instalacji niedostepny.' }
+    if ([string]::IsNullOrWhiteSpace([string]$mg)) { throw 'Brak MachineGuid - identyfikator instalacji niedostepny.' }
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("D01I-INSTALL|$mg"))
@@ -124,10 +124,10 @@ function Invoke-D01iApi {
 }
 
 function Protect-D01iSecret {
-    <# DPAPI (CurrentUser) — klucz licencyjny nigdy nie leży na dysku jako jawny tekst. #>
+    <# DPAPI (CurrentUser) - klucz licencyjny nigdy nie lezy na dysku jako jawny tekst. #>
     param([Parameter(Mandatory)][string]$Plain)
     if ($IsWindows -eq $false -and -not (Get-Variable IsWindows -ErrorAction SilentlyContinue)) {
-        # PS 5.1 nie ma $IsWindows — wykrywamy platformę przez [System.Environment]::OSVersion
+        # PS 5.1 nie ma $IsWindows - wykrywamy platforme przez [System.Environment]::OSVersion
     }
     $os = [System.Environment]::OSVersion.Platform
     if ($os -ne [System.PlatformID]::Win32NT) { throw 'DPAPI dostepne tylko na Windows. Odmowa zapisu klucza jako jawnego tekstu.' }
@@ -145,7 +145,7 @@ function Unprotect-D01iSecret {
 
 function Set-D01iSecureAcl {
     <# Restrykcyjny ACL katalogu/pliku: tylko SYSTEM (S-1-5-18) i lokalni Administratorzy (S-1-5-32-544).
-       Błędy NIE są ignorowane — zwracamy $false. #>
+       Bledy NIE sa ignorowane - zwracamy $false. #>
     param([Parameter(Mandatory)][string]$Path)
     try {
         $acl = Get-Acl $Path
@@ -185,7 +185,7 @@ function Save-D01iLicenseState {
 }
 
 function Invoke-D01iActivate {
-    <# Aktywacja online kluczem. Klucz zapisujemy WYŁĄCZNIE jako DPAPI blob. #>
+    <# Aktywacja online kluczem. Klucz zapisujemy WYLACZNIE jako DPAPI blob. #>
     param([Parameter(Mandatory)][string]$Key)
     $key = ($Key.Trim() -replace '\s+','').ToUpper()
     if ($key.Length -lt 10) { return @{ ok=$false; reason='KEY_TOO_SHORT' } }
@@ -220,7 +220,7 @@ function Invoke-D01iRefresh {
 }
 
 function Invoke-D01iReauth {
-    <# Ponowna aktywacja online po wygaśnięciu tokena — klucz odczytany z DPAPI, użytkownik nie wpisuje go ponownie. #>
+    <# Ponowna aktywacja online po wygasnieciu tokena - klucz odczytany z DPAPI, uzytkownik nie wpisuje go ponownie. #>
     $st = Get-D01iLicenseState
     if (-not $st -or -not $st.key_dpapi) { return @{ ok=$false; reason='NO_STORED_KEY' } }
     $key = $null
@@ -230,14 +230,14 @@ function Invoke-D01iReauth {
 
 function Test-D01iLicense {
     <# ONLINE walidacja. valid=$true tylko gdy serwer potwierdzi.
-       Cykl: ważny token → OK; token bliski wygaśnięcia → refresh; token wygasły → ponowna aktywacja kluczem DPAPI;
-       revoke/expiry/HWID_MISMATCH/brak internetu → valid=$false (blokada PREMIUM, bez grace period). #>
+       Cykl: wazny token ? OK; token bliski wygasniecia ? refresh; token wygasly ? ponowna aktywacja kluczem DPAPI;
+       revoke/expiry/HWID_MISMATCH/brak internetu ? valid=$false (blokada PREMIUM, bez grace period). #>
     param([string[]]$AllowTypes = @('DEMO','PREMIUM_30D','PREMIUM_90D','PREMIUM_LIFETIME'))
     $v = Test-D01iApiBase
     if (-not $v.ok) { return @{ valid=$false; reason=$v.error; message=$v.message } }
     $st = Get-D01iLicenseState
     if (-not $st -or -not $st.token) { return @{ valid=$false; reason='NO_LICENSE' } }
-    # 1) token jeszcze ważny i ma zapas ≥30 s → validate
+    # 1) token jeszcze wazny i ma zapas ?30 s ? validate
     $needsRefresh = $true
     try {
         $exp = [datetime]::Parse($st.token_expires_at)
@@ -246,13 +246,13 @@ function Test-D01iLicense {
     if ($needsRefresh) {
         $rf = Invoke-D01iRefresh $st
         if (-not $rf.ok) {
-            # 2) refresh odrzucony (np. token wygasł) → ponowna aktywacja zapamiętanym kluczem
+            # 2) refresh odrzucony (np. token wygasl) ? ponowna aktywacja zapamietanym kluczem
             if ($rf.reason -eq 'TOKEN_EXPIRED' -or $rf.reason -eq 'TOKEN_REVOKED' -or $rf.reason -eq 'TOKEN_INVALID') {
                 $ra = Invoke-D01iReauth
                 if (-not $ra.ok) { return @{ valid=$false; reason=$ra.reason; message=$ra.message } }
                 $st = Get-D01iLicenseState
             } else {
-                return @{ valid=$false; reason=$rf.reason }   # brak internetu / błąd sieci
+                return @{ valid=$false; reason=$rf.reason }   # brak internetu / blad sieci
             }
         } else { $st = Get-D01iLicenseState }
     }
@@ -274,13 +274,13 @@ function Assert-D01iPremium {
         'TOKEN_REVOKED'    = 'Licencja zostala uniewazniona (revoke).'
         'LICENSE_REVOKED'  = 'Licencja zostala uniewazniona.'
         'LICENSE_EXPIRED'  = 'Licencja wygasla.'
-        'HWID_MISMATCH'    = 'HWID nie zgadza sie z aktywacja — skontaktuj sie z supportem.'
-        'HWID_UNAVAILABLE' = 'Nie mozna odczytac HWID — aktywacja niemozliwa.'
+        'HWID_MISMATCH'    = 'HWID nie zgadza sie z aktywacja - skontaktuj sie z supportem.'
+        'HWID_UNAVAILABLE' = 'Nie mozna odczytac HWID - aktywacja niemozliwa.'
     }
     $msg = "Licencja niewazna ($($lic.reason))."
     if ($map.ContainsKey($lic.reason)) { $msg = $map[$lic.reason] }
-    if ($lic.reason -like 'HTTP_*' -or $lic.reason -like 'CONFIG_*') { $msg = "Brak polaczenia z serwerem licencji — funkcja PREMIUM niedostepna (tryb online). $msg" }
-    Write-Host "   [BŁĄD] $Feature wymaga aktywnej licencji PREMIUM: $msg" -ForegroundColor Red
+    if ($lic.reason -like 'HTTP_*' -or $lic.reason -like 'CONFIG_*') { $msg = "Brak polaczenia z serwerem licencji - funkcja PREMIUM niedostepna (tryb online). $msg" }
+    Write-Host "   [BLAD] $Feature wymaga aktywnej licencji PREMIUM: $msg" -ForegroundColor Red
     return $false
 }
 
@@ -293,8 +293,8 @@ function Get-D01iLicenseStatus {
 }
 
 function Invoke-D01iDeactivate {
-    <# Dezaktywacja: najpierw token; jeśli token wygasły — key + install_id (backend przyjmuje oba warianty),
-       żeby wygasły token NIGDY nie blokował zwolnienia slotu licencji. #>
+    <# Dezaktywacja: najpierw token; jesli token wygasly - key + install_id (backend przyjmuje oba warianty),
+       zeby wygasly token NIGDY nie blokowal zwolnienia slotu licencji. #>
     $st = Get-D01iLicenseState
     if (-not $st) { return @{ ok=$false; reason='NO_LICENSE' } }
     $body = @{ install_id=$st.install_id }

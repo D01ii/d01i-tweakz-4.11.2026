@@ -3,9 +3,9 @@
 # D01i Tweakz - instalator produkcyjny backendu na Ubuntu Server LTS
 # Wymaga: Ubuntu 22.04/24.04 LTS, uruchomienie jako root (sudo).
 # Instaluje: Node.js 22 LTS, PostgreSQL, Caddy, UFW, systemd,
-#            baze danych z ograniczonym użytkownikiem, klucze Ed25519,
-#            sekrety, migracje i usługę d01i-backend.
-# Idempotentny: bezpiecznie uruchomić ponownie.
+#            baze danych z ograniczonym uzytkownikiem, klucze Ed25519,
+#            sekrety, migracje i usluge d01i-backend.
+# Idempotentny: bezpiecznie uruchomic ponownie.
 # ============================================================
 set -euo pipefail
 
@@ -17,11 +17,11 @@ KEYS_DIR="/etc/${APP_NAME}/keys"
 DB_NAME="d01i_tweakz"
 DB_USER="d01i_app"
 LOG_DIR="/var/log/${APP_NAME}"
-CADDY_DOMAIN="${CADDY_DOMAIN:-api.example.com}"   # zmień na swoją domenę!
-CADDY_EMAIL="${CADDY_EMAIL:-admin@example.com}"    # zmień na swój e-mail!
+CADDY_DOMAIN="${CADDY_DOMAIN:-api.example.com}"   # zmien na swoja domene!
+CADDY_EMAIL="${CADDY_EMAIL:-admin@example.com}"    # zmien na swoj e-mail!
 
 log()  { echo -e "[install] $*"; }
-err()  { echo -e "[install][BŁĄD] $*" >&2; }
+err()  { echo -e "[install][BLAD] $*" >&2; }
 
 require_root() {
   if [ "$(id -u)" -ne 0 ]; then err "Uruchom jako root: sudo bash install-ubuntu.sh"; exit 1; fi
@@ -34,11 +34,11 @@ detect_ubuntu() {
 }
 
 install_packages() {
-  log "Aktualizacja indeksów i instalacja pakietów..."
+  log "Aktualizacja indeksow i instalacja pakietow..."
   apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     curl ca-certificates gnupg ufw postgresql postgresql-contrib nodejs npm caddy jq openssl
-  # Node.js przez NodeSource tylko jeśli systemowy jest starszy niż 20
+  # Node.js przez NodeSource tylko jesli systemowy jest starszy niz 20
   NODE_MAJOR="$(node -v 2>/dev/null | sed 's/v\([0-9]*\).*/\1/' || echo 0)"
   if [ "${NODE_MAJOR}" -lt 20 ]; then
     log "Systemowy Node.js (<20) - instalacja Node.js 22 LTS z NodeSource..."
@@ -49,9 +49,9 @@ install_packages() {
 }
 
 configure_postgres() {
-  log "Konfiguracja PostgreSQL (lokalny tylko, bez dostępu z zewnątrz)..."
+  log "Konfiguracja PostgreSQL (lokalny tylko, bez dostepu z zewnatrz)..."
   systemctl enable --now postgresql
-  # Upewnij się, że PostgreSQL słucha tylko na localhost
+  # Upewnij sie, ze PostgreSQL slucha tylko na localhost
   PG_CONF="$(su - postgres -c "psql -tAc 'show config_file'")"
   PG_HBA="$(su - postgres -c "psql -tAc 'show hba_file'")"
   grep -q '^listen_addresses' "$PG_CONF" \
@@ -64,20 +64,20 @@ configure_postgres() {
     su - postgres -c "psql -c \"CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';\""
     echo "${DB_PASS}" > "/etc/${APP_NAME}/.db_password"
     chown root:root "/etc/${APP_NAME}/.db_password"; chmod 600 "/etc/${APP_NAME}/.db_password"
-    log "Utworzono użytkownika bazy ${DB_USER} (hasło zapisane w /etc/${APP_NAME}/.db_password)."
+    log "Utworzono uzytkownika bazy ${DB_USER} (haslo zapisane w /etc/${APP_NAME}/.db_password)."
   else
     DB_PASS="$(cat /etc/${APP_NAME}/.db_password 2>/dev/null || true)"
     [ -z "$DB_PASS" ] && { DB_PASS="$(openssl rand -hex 24)"; su - postgres -c "psql -c \"ALTER ROLE ${DB_USER} PASSWORD '${DB_PASS}';\""; echo "${DB_PASS}" > "/etc/${APP_NAME}/.db_password"; chown root:root "/etc/${APP_NAME}/.db_password"; chmod 600 "/etc/${APP_NAME}/.db_password"; }
-    log "Użytkownik bazy ${DB_USER} już istnieje."
+    log "Uzytkownik bazy ${DB_USER} juz istnieje."
   fi
 
   if ! su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'\"" | grep -q 1; then
     su - postgres -c "createdb -O ${DB_USER} ${DB_NAME}"
-    log "Utworzono bazę ${DB_NAME} (właściciel: ${DB_USER})."
+    log "Utworzono baze ${DB_NAME} (wlasciciel: ${DB_USER})."
   else
-    log "Baza ${DB_NAME} już istnieje - NIE jest kasowana."
+    log "Baza ${DB_NAME} juz istnieje - NIE jest kasowana."
   fi
-  # Ograniczenie uprawnień: tylko własna baza, brak superuser
+  # Ograniczenie uprawnien: tylko wlasna baza, brak superuser
   su - postgres -c "psql -c \"ALTER ROLE ${DB_USER} NOSUPERUSER NOCREATEDB NOCREATEROLE;\"" || true
 }
 
@@ -98,7 +98,7 @@ count_encrypted_rows() {
 }
 
 ensure_config_dirs() {
-  # A1: /etc/d01i-tweakz musi istnieć przed pierwszym zapisem sekretu (.db_password w configure_postgres).
+  # A1: /etc/d01i-tweakz musi istniec przed pierwszym zapisem sekretu (.db_password w configure_postgres).
   if [ ! -d "/etc/${APP_NAME}" ]; then
     install -d -m 750 -o root -g "${APP_USER}" "/etc/${APP_NAME}"
     log "Utworzono /etc/${APP_NAME} (750, root:${APP_USER})."
@@ -110,14 +110,14 @@ ensure_config_dirs() {
 create_app_user() {
   if ! id "${APP_USER}" >/dev/null 2>&1; then
     useradd --system --home "${APP_DIR}" --shell /usr/sbin/nologin "${APP_USER}"
-    log "Utworzono użytkownika systemowego ${APP_USER} (nologin, bez root)."
+    log "Utworzono uzytkownika systemowego ${APP_USER} (nologin, bez root)."
   fi
 }
 
 deploy_app() {
   log "Kopiowanie aplikacji do ${APP_DIR}..."
   mkdir -p "${APP_DIR}"
-  # W produkcji: skopiuj zawartość katalogu backend/ z repozytorium.
+  # W produkcji: skopiuj zawartosc katalogu backend/ z repozytorium.
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   SRC_DIR="$(cd "${SCRIPT_DIR}/../../backend" && pwd)"
   cp -r "${SRC_DIR}/src" "${SRC_DIR}/migrations" "${SRC_DIR}/package.json" "${SRC_DIR}/package-lock.json" "${APP_DIR}/" 2>/dev/null || true
@@ -171,9 +171,9 @@ ADMIN_SESSION_TTL_HOURS=8
 MAX_DEVICES_DEFAULT=2
 DISCORD_WEBHOOK_ENABLED=false
 EOF
-    log "Wygenerowano ${ENV_FILE} (sekretny). Zmień hasło bootstrap admina po pierwszym logowaniu!"
+    log "Wygenerowano ${ENV_FILE} (sekretny). Zmien haslo bootstrap admina po pierwszym logowaniu!"
   else
-    log "Plik ${ENV_FILE} już istnieje - pozostawiam bez zmian."
+    log "Plik ${ENV_FILE} juz istnieje - pozostawiam bez zmian."
     if ! grep -q '^SECRET_ENC_KEY=[0-9a-f]\{64\}$' "${ENV_FILE}"; then
       # Jezeli w bazie sa juz zaszyfrowane sekrety, brak klucza uniemozliwi ich odczyt.
       if ! ENC_ROWS="$(count_encrypted_rows)"; then
@@ -203,14 +203,14 @@ EOF
 }
 
 install_systemd() {
-  log "Instalacja usługi systemd..."
+  log "Instalacja uslugi systemd..."
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   cp "${SCRIPT_DIR}/../systemd/d01i-backend.service" /etc/systemd/system/d01i-backend.service
   systemctl daemon-reload
   systemctl enable d01i-backend
   systemctl restart d01i-backend
   sleep 2
-  systemctl is-active --quiet d01i-backend && log "Usługa d01i-backend aktywna." || { err "Usługa nie wystartowała - sprawdź: journalctl -u d01i-backend"; exit 1; }
+  systemctl is-active --quiet d01i-backend && log "Usluga d01i-backend aktywna." || { err "Usluga nie wystartowala - sprawdz: journalctl -u d01i-backend"; exit 1; }
 }
 
 configure_caddy() {
@@ -246,21 +246,21 @@ report() {
   cat <<EOF
 
 ============================================================
- INSTALACJA D01i Tweakz zakończona
+ INSTALACJA D01i Tweakz zakonczona
 ============================================================
- Aplikacja:      ${APP_DIR} (użytkownik: ${APP_USER}, NIE root)
+ Aplikacja:      ${APP_DIR} (uzytkownik: ${APP_USER}, NIE root)
  Konfiguracja:   ${ENV_FILE} (chmod 600)
  Klucze Ed25519: ${KEYS_DIR}
- Baza:           PostgreSQL ${DB_NAME} (tylko localhost, użytkownik ${DB_USER})
- Usługa:         systemctl status d01i-backend  (auto-start po restarcie)
+ Baza:           PostgreSQL ${DB_NAME} (tylko localhost, uzytkownik ${DB_USER})
+ Usluga:         systemctl status d01i-backend  (auto-start po restarcie)
  Panel admina:   https://${CADDY_DOMAIN}/admin
  API health:     https://${CADDY_DOMAIN}/api/v1/admin/ops/health
  Logi:           journalctl -u d01i-backend -f
  Backup:         deploy/ubuntu/backup-database.sh
 
  PIERWSZE KROKI:
- 1. Zaloguj się do panelu (konto bootstrap z ${ENV_FILE}).
- 2. Włącz MFA (Konto -> MFA) i zapisz kody odzyskiwania.
+ 1. Zaloguj sie do panelu (konto bootstrap z ${ENV_FILE}).
+ 2. Wlacz MFA (Konto -> MFA) i zapisz kody odzyskiwania.
  3. Wygeneruj pierwszy klucz licencyjny.
  4. Opcjonalnie ustaw webhook Discord (Ustawienia).
 ============================================================

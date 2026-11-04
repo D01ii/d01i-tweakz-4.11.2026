@@ -35,7 +35,7 @@ function Test-OurBackendRunning {
 }
 
 $running = Test-OurBackendRunning
-if ($running) { Write-Host "Backend już działa (PID $($running.Id), start $($running.StartTime))."; exit 0 }
+if ($running) { Write-Host "Backend juz dziala (PID $($running.Id), start $($running.StartTime))."; exit 0 }
 if (Test-Path $PidFile) { Remove-Item $PidFile -ErrorAction SilentlyContinue }  # stary/nieaktualny plik PID
 
 Write-Host "Start backendu: $NodeExe $EntryScript (log: $log)..."
@@ -53,7 +53,7 @@ Write-Host "Zapisano $PidFile (PID $($proc.Id))"
 Start-Sleep -Seconds 3
 try {
     $r = Invoke-RestMethod "http://127.0.0.1:$Port/api/v1/admin/ops/health" -TimeoutSec 5
-    Write-Host "OK: backend działa (db=$($r.db))" -ForegroundColor Green
+    Write-Host "OK: backend dziala (db=$($r.db))" -ForegroundColor Green
 } catch {
-    Write-Host "Backend nie odpowiada jeszcze - sprawdź $logErr" -ForegroundColor Yellow
+    Write-Host "Backend nie odpowiada jeszcze - sprawdz $logErr" -ForegroundColor Yellow
 }

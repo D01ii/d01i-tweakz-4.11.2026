@@ -1,4 +1,4 @@
-﻿# D01i Tweakz - diagnostyka środowiska Windows 11 (tylko odczyt).
+﻿# D01i Tweakz - diagnostyka srodowiska Windows 11 (tylko odczyt).
 #requires -Version 5.1
 $ErrorActionPreference = 'Continue'
 Write-Host "== D01i Tweakz - Check-Environment ==" -ForegroundColor Cyan
@@ -18,4 +18,4 @@ $fw | ForEach-Object { Write-Host "Firewall: $($_.Name) enabled=$($_.Enabled)" }
 try {
     $r = Invoke-RestMethod http://127.0.0.1:8080/api/v1/admin/ops/health -TimeoutSec 3
     Write-Host "Backend health: OK (db=$($r.db))"
-} catch { Write-Host "Backend health: NIEDOSTĘPNY na 127.0.0.1:8080" }
+} catch { Write-Host "Backend health: NIEDOSTEPNY na 127.0.0.1:8080" }

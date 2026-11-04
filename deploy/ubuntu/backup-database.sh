@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# D01i Tweakz - backup bazy PostgreSQL (dump + gzip), z rotacją (domyślnie 14 dni).
+# D01i Tweakz - backup bazy PostgreSQL (dump + gzip), z rotacja (domyslnie 14 dni).
 set -euo pipefail
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/d01i-tweakz}"
 KEEP_DAYS="${KEEP_DAYS:-14}"
@@ -12,6 +12,6 @@ OUT="${BACKUP_DIR}/${DB_NAME}-${STAMP}.sql.gz"
 sudo -u postgres pg_dump "${DB_NAME}" | gzip > "${OUT}"
 chmod 600 "${OUT}"
 echo "[backup] Zapisano ${OUT} ($(du -h "${OUT}" | cut -f1))"
-# Rotacja: kasuj starsze niż KEEP_DAYS
+# Rotacja: kasuj starsze niz KEEP_DAYS
 find "${BACKUP_DIR}" -name "${DB_NAME}-*.sql.gz" -mtime +"${KEEP_DAYS}" -delete
 echo "[backup] Rotacja: pozostawiono kopie z ostatnich ${KEEP_DAYS} dni."

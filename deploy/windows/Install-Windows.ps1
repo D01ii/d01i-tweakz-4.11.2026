@@ -2,8 +2,8 @@
 # D01i Tweakz - instalator deweloperski backendu na Windows 11 (Home/Pro)
 # Wymaga: Windows 11, PowerShell 5.1+, uruchomienie jako Administrator.
 # Instaluje NATYWNIE (bez WSL/Dockera): Node.js LTS, PostgreSQL,
-# bazę + użytkownika, sekrety, klucze Ed25519, migracje, usługę (lub start ręczny).
-# Idempotentny - bezpiecznie uruchomić ponownie. NIE usuwa istniejących danych.
+# baze + uzytkownika, sekrety, klucze Ed25519, migracje, usluge (lub start reczny).
+# Idempotentny - bezpiecznie uruchomic ponownie. NIE usuwa istniejacych danych.
 # ============================================================
 #requires -Version 5.1
 [CmdletBinding()]
@@ -15,7 +15,7 @@ param(
     [string]$DbUser = "d01i_app",
     [int]$Port = 8080,
     [string]$PublicBaseUrl = "http://localhost:8080",
-    [switch]$NoService   # nie rejestruj zadania/usługi, tylko przygotuj środowisko
+    [switch]$NoService   # nie rejestruj zadania/uslugi, tylko przygotuj srodowisko
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,7 +34,7 @@ function New-SecureRandomHex([int]$ByteCount = 32) {
 
 function Write-Info($m) { Write-Host "[install] $m" -ForegroundColor Cyan }
 function Write-Warn2($m) { Write-Host "[install][UWAGA] $m" -ForegroundColor Yellow }
-function Write-Err2($m) { Write-Host "[install][BŁĄD] $m" -ForegroundColor Red }
+function Write-Err2($m) { Write-Host "[install][BLAD] $m" -ForegroundColor Red }
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -64,12 +64,12 @@ function Install-NodeIfMissing {
     $url = "https://nodejs.org/dist/v22.14.0/node-v22.14.0-$arch.msi"
     $msi = "$env:TEMP\nodejs-lts.msi"
     Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
-    Write-Info "Instalacja Node.js (wymaga zamknięcia tego okna po zakończeniu MSI)..."
+    Write-Info "Instalacja Node.js (wymaga zamkniecia tego okna po zakonczeniu MSI)..."
     Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
     $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
     $node = Get-Command node -ErrorAction SilentlyContinue
     if (-not $node) {
-        Write-Warn2 "Node.js może wymagać restartu systemu. Po restarcie uruchom ponownie Install-Windows.ps1."
+        Write-Warn2 "Node.js moze wymagac restartu systemu. Po restarcie uruchom ponownie Install-Windows.ps1."
         exit 0
     }
     Write-Info "Node.js zainstalowany: $(node -v)"
@@ -77,8 +77,8 @@ function Install-NodeIfMissing {
 
 function Install-PostgresIfMissing {
     $pg = Get-Service -Name 'postgresql*' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($pg) { Write-Info "PostgreSQL wykryty (usługa: $($pg.Name))."; return }
-    # Chocolatey jako wygodna ścieżka; fallback: ręczny instalator EDB
+    if ($pg) { Write-Info "PostgreSQL wykryty (usluga: $($pg.Name))."; return }
+    # Chocolatey jako wygodna sciezka; fallback: reczny instalator EDB
     $choco = Get-Command choco -ErrorAction SilentlyContinue
     if ($choco) {
         Write-Info "Instalacja PostgreSQL przez Chocolatey..."
@@ -93,7 +93,7 @@ function Install-PostgresIfMissing {
     }
     Start-Sleep -Seconds 3
     $pg = Get-Service -Name 'postgresql*' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($pg) { Set-Service $pg.Name -StartupType Automatic; Start-Service $pg.Name -ErrorAction SilentlyContinue; Write-Info "Usługa $($pg.Name) uruchomiona." }
+    if ($pg) { Set-Service $pg.Name -StartupType Automatic; Start-Service $pg.Name -ErrorAction SilentlyContinue; Write-Info "Usluga $($pg.Name) uruchomiona." }
 }
 
 function Get-PsqlPath {
@@ -105,7 +105,7 @@ function Get-PsqlPath {
     foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
     $p = Get-Command psql -ErrorAction SilentlyContinue
     if ($p) { return $p.Source }
-    throw "Nie znaleziono psql.exe - sprawdź instalację PostgreSQL."
+    throw "Nie znaleziono psql.exe - sprawdz instalacje PostgreSQL."
 }
 
 function Invoke-Psql($sql) {
@@ -114,16 +114,16 @@ function Invoke-Psql($sql) {
 }
 
 function Configure-Database {
-    Write-Info "Konfiguracja bazy ${DbName} i użytkownika ${DbUser}..."
+    Write-Info "Konfiguracja bazy ${DbName} i uzytkownika ${DbUser}..."
     $exists = Invoke-Psql "SELECT 1 FROM pg_roles WHERE rolname='$DbUser'"
     $dbPassFile = "$env:ProgramData\D01iTweakz\.db_password"
     if ($exists -ne '1') {
         $dbPass = New-SecureRandomHex 48      # haslo DB: 48 bajtow
         Invoke-Psql "CREATE ROLE $DbUser LOGIN PASSWORD '$dbPass' NOSUPERUSER NOCREATEDB NOCREATEROLE" | Out-Null
         $dbPass | Out-File -FilePath $dbPassFile -Encoding ascii -NoNewline
-        Write-Info "Utworzono użytkownika bazy $DbUser."
+        Write-Info "Utworzono uzytkownika bazy $DbUser."
     } else {
-        Write-Info "Użytkownik bazy już istnieje."
+        Write-Info "Uzytkownik bazy juz istnieje."
         $dbPass = Get-Content $dbPassFile -ErrorAction SilentlyContinue
         if (-not $dbPass) {
             $dbPass = New-SecureRandomHex 48   # haslo DB: 48 bajtow
@@ -134,9 +134,9 @@ function Configure-Database {
     $dbExists = Invoke-Psql "SELECT 1 FROM pg_database WHERE datname='$DbName'"
     if ($dbExists -ne '1') {
         Invoke-Psql "CREATE DATABASE $DbName OWNER $DbUser" | Out-Null
-        Write-Info "Utworzono bazę $DbName."
+        Write-Info "Utworzono baze $DbName."
     } else {
-        Write-Warn2 "Baza $DbName już istnieje - NIE jest kasowana ani modyfikowana."
+        Write-Warn2 "Baza $DbName juz istnieje - NIE jest kasowana ani modyfikowana."
     }
     return $dbPass
 }
@@ -181,9 +181,9 @@ ADMIN_SESSION_TTL_HOURS=8
 MAX_DEVICES_DEFAULT=2
 DISCORD_WEBHOOK_ENABLED=false
 "@ | Out-File -FilePath $EnvFile -Encoding ascii
-        Write-Info "Wygenerowano $EnvFile (bootstrap admin: admin / hasło w pliku .env)."
+        Write-Info "Wygenerowano $EnvFile (bootstrap admin: admin / haslo w pliku .env)."
     } else {
-        Write-Info "Plik .env już istnieje - bez zmian."
+        Write-Info "Plik .env juz istnieje - bez zmian."
         # Rerun: jesli .env nie ma poprawnego SECRET_ENC_KEY, a w bazie sa zaszyfrowane
         # sekrety - NIE generuj nowego klucza (stracilibysmy dostep do danych).
         $hasKey = Select-String -Path $EnvFile -Pattern '^SECRET_ENC_KEY=[0-9a-f]{64}$' -Quiet
@@ -203,7 +203,7 @@ DISCORD_WEBHOOK_ENABLED=false
 }
 
 function Install-DependenciesAndMigrate {
-    Write-Info "Instalacja zależności npm i migracje..."
+    Write-Info "Instalacja zaleznosci npm i migracje..."
     Push-Location $InstallDir
     npm ci --omit=dev --no-audit --no-fund
     $envContent = Get-Content $EnvFile -Raw
@@ -225,24 +225,24 @@ function Test-Health {
 # ----------------------------- main -----------------------------
 if (-not (Test-Admin)) { Write-Err2 "Uruchom PowerShell jako Administrator."; exit 1 }
 
-# A2: katalog danych aplikacji musi istnieć przed pierwszym zapisem sekretu (.db_password).
+# A2: katalog danych aplikacji musi istniec przed pierwszym zapisem sekretu (.db_password).
 New-Item -ItemType Directory -Force -Path "$env:ProgramData\D01iTweakz", $KeysDir | Out-Null
 Write-Info "Katalog danych: $env:ProgramData\D01iTweakz"
 
 $v = Get-WindowsVersionInfo
 Write-Info "Windows: $($v.Caption) (build $($v.Build))"
-if (-not (Test-Windows11)) { Write-Warn2 "Wykryto inny system niż Windows 11 - kontynuuję mimo to." }
+if (-not (Test-Windows11)) { Write-Warn2 "Wykryto inny system niz Windows 11 - kontynuuje mimo to." }
 
 Install-NodeIfMissing
 Install-PostgresIfMissing
 
-Write-Info "Przygotowanie katalogów..."
+Write-Info "Przygotowanie katalogow..."
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $src = Join-Path $PSScriptRoot '..\..\backend'
 if (Test-Path (Join-Path $src 'src')) {
     Copy-Item (Join-Path $src 'src'), (Join-Path $src 'migrations'), (Join-Path $src 'package.json'), (Join-Path $src 'package-lock.json') -Destination $InstallDir -Recurse -Force
 } else {
-    Write-Warn2 "Nie znaleziono backend/ obok deploy/windows - skopiuj ręcznie zawartość backend/ do $InstallDir"
+    Write-Warn2 "Nie znaleziono backend/ obok deploy/windows - skopiuj recznie zawartosc backend/ do $InstallDir"
 }
 
 $dbPass = Configure-Database
@@ -259,12 +259,12 @@ if (-not $NoService) {
 if (Test-Health) {
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Green
-    Write-Host " INSTALACJA ZAKOŃCZONA POMYŚLNIE" -ForegroundColor Green
+    Write-Host " INSTALACJA ZAKONCZONA POMYSLNIE" -ForegroundColor Green
     Write-Host "============================================================" -ForegroundColor Green
     Write-Host " Panel admina:  http://localhost:$Port/admin"
     Write-Host " API health:    http://localhost:$Port/api/v1/admin/ops/health"
     Write-Host " Dane logowania admina (bootstrap): patrz $EnvFile"
-    Write-Host " Użyj Start-Backend.ps1 / Stop-Backend.ps1 do zarządzania."
+    Write-Host " Uzyj Start-Backend.ps1 / Stop-Backend.ps1 do zarzadzania."
 } else {
-    Write-Warn2 "Serwer nie odpowiedział na healthcheck - uruchom: Start-Backend.ps1 i sprawdź logi."
+    Write-Warn2 "Serwer nie odpowiedzial na healthcheck - uruchom: Start-Backend.ps1 i sprawdz logi."
 }

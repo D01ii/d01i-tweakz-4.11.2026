@@ -32,16 +32,16 @@ try { $Host.UI.RawUI.WindowTitle = $script:ProductName } catch {}
 
 # ====================== LOGO (design z darmowej) ======================
 $script:Logo = @'
-░███████     ░████     ░██   ░██      ░██                                            ░██
-░██   ░██   ░██ ░██  ░████            ░██                                            ░██
-░██    ░██ ░██ ░████   ░██   ░██   ░████████ ░██    ░██    ░██  ░███████   ░██████   ░██    ░██░█████████
-░██    ░██ ░██░██░██   ░██   ░██      ░██    ░██    ░██    ░██ ░██    ░██       ░██  ░██   ░██      ░███
-░██    ░██ ░████ ░██   ░██   ░██      ░██     ░██  ░████  ░██  ░█████████  ░███████  ░███████     ░███
-░██   ░██   ░██ ░██    ░██   ░██      ░██      ░██░██ ░██░██   ░██        ░██   ░██  ░██   ░██  ░███
-░███████     ░████   ░██████ ░██       ░████    ░███   ░███     ░███████   ░█████░██ ░██    ░██░█████████
+????????     ?????     ???   ???      ???                                            ???
+???   ???   ??? ???  ?????            ???                                            ???
+???    ??? ??? ?????   ???   ???   ????????? ???    ???    ???  ????????   ???????   ???    ?????????????
+???    ??? ?????????   ???   ???      ???    ???    ???    ??? ???    ???       ???  ???   ???      ????
+???    ??? ????? ???   ???   ???      ???     ???  ?????  ???  ??????????  ????????  ????????     ????
+???   ???   ??? ???    ???   ???      ???      ?????? ??????   ???        ???   ???  ???   ???  ????
+????????     ?????   ??????? ???       ?????    ????   ????     ????????   ????????? ???    ?????????????
 '@
 
-# ====================== LICENCJA (SERWEROWA — Runda 5) ======================
+# ====================== LICENCJA (SERWEROWA - Runda 5) ======================
 # Serwer jest jedynym zrodlem prawdy. Klient nie zawiera sekretow ani lokalnego
 # generatora kluczy. Aktywacja: POST /api/v1/license/activate, walidacja: /validate
 # + odswiezanie /refresh (TTL 120 s). Brak internetu = brak autoryzacji PREMIUM.
@@ -104,7 +104,7 @@ function Invoke-License {
                     Write-Ok "Licencja aktywowana: $($r.license.type), wygasa: $($r.license.expires_at)"
                     return $true
                 }
-                Write-Err "Aktywacja nieudana: $($r.reason) — $($r.message)"
+                Write-Err "Aktywacja nieudana: $($r.reason) - $($r.message)"
                 Start-Sleep 2
             }
             '2' {
@@ -158,7 +158,7 @@ function Write-Log {
 }
 function Write-Ok   { param([string]$m) Write-Host ('   [OK]    ' + $m) -ForegroundColor Green;    Write-Log $m 'OK'    }
 function Write-Warn { param([string]$m) Write-Host ('   [UWAGA] ' + $m) -ForegroundColor Yellow;   Write-Log $m 'WARN'  }
-function Write-Err  { param([string]$m) Write-Host ('   [BŁĄD]  ' + $m) -ForegroundColor Red;      Write-Log $m 'ERROR' }
+function Write-Err  { param([string]$m) Write-Host ('   [BLAD]  ' + $m) -ForegroundColor Red;      Write-Log $m 'ERROR' }
 function Write-Info { param([string]$m) Write-Host ('   [i]     ' + $m) -ForegroundColor Cyan;     Write-Log $m 'INFO'  }
 function Write-Step { param([string]$m) Write-Host ("`n==> " + $m)      -ForegroundColor Magenta;  Write-Log $m 'STEP'  }
 function Wait-Enter {
@@ -439,7 +439,7 @@ function Get-BcdValue {
     try {
         $out = (& bcdedit.exe /enum '{current}' 2>&1 | Out-String)
         if ($out -match "(?m)^\s*$Setting\s+(\S+)") { return $Matches[1] }
-        return $null   # wartość nie istnieje
+        return $null   # wartosc nie istnieje
     } catch { return $null }
 }
 
@@ -457,17 +457,17 @@ function Set-BcdSetting {
 }
 
 function Restore-Bcd {
-    <# Przywraca oryginalne wartości BCD; usuwa wartość tylko gdy D01i ją utworzył (wcześniej nie istniała). #>
+    <# Przywraca oryginalne wartosci BCD; usuwa wartosc tylko gdy D01i ja utworzyl (wczesniej nie istniala). #>
     $saved = @($script:State.BcdUndo)
     if ($saved.Count -eq 0) { Write-Info 'Brak zapisanych zmian BCD.'; return }
     foreach ($e in $saved) {
         try {
             if ($e.OldExisted) {
                 & bcdedit.exe /set $e.Setting $e.OldValue 2>&1 | Out-Null
-                Write-Ok ("BCD przywrócone: {0}={1}" -f $e.Setting, $e.OldValue)
+                Write-Ok ("BCD przywrocone: {0}={1}" -f $e.Setting, $e.OldValue)
             } else {
                 & bcdedit.exe /deletevalue '{current}' $e.Setting 2>&1 | Out-Null
-                Write-Ok ("BCD usunięte (utworzone przez d01i): {0}" -f $e.Setting)
+                Write-Ok ("BCD usuniete (utworzone przez d01i): {0}" -f $e.Setting)
             }
         } catch { Write-Warn ("BCD {0}: {1}" -f $e.Setting, $_.Exception.Message) }
     }
@@ -502,10 +502,10 @@ function Restore-PowerUndo {
     $saved = @($script:State.PowerUndo)
     if ($saved.Count -eq 0) { Write-Info 'Brak zapisanych zmian powercfg.'; return }
     foreach ($e in $saved) {
-        if (-not $e.OldExisted) { Write-Info ("Pomijam {0}/{1}/{2} (nie istniało przed zmianą)." -f $e.SubG,$e.Setting,$e.Scope); continue }
+        if (-not $e.OldExisted) { Write-Info ("Pomijam {0}/{1}/{2} (nie istnialo przed zmiana)." -f $e.SubG,$e.Setting,$e.Scope); continue }
         $flag = if ($e.Scope -eq 'DC') {'/setdcvalueindex'} else {'/setacvalueindex'}
         & powercfg.exe $flag SCHEME_CURRENT $e.SubG $e.Setting $e.OldValue 2>&1 | Out-Null
-        Write-Ok ("powercfg przywrócone: {0}/{1}/{2}={3}" -f $e.SubG,$e.Setting,$e.Scope,$e.OldValue)
+        Write-Ok ("powercfg przywrocone: {0}/{1}/{2}={3}" -f $e.SubG,$e.Setting,$e.Scope,$e.OldValue)
     }
     & powercfg.exe /setactive SCHEME_CURRENT 2>&1 | Out-Null
 }
@@ -1268,11 +1268,11 @@ function Invoke-Undo {
     Write-Host ''
     Write-Host ''
     Write-Host '  RAPORT COFANIA:' -ForegroundColor Cyan
-    Write-Host '   - rejestr/usługi/zadania/powercfg/BCD: przywracane tylko z zapisanych stanów.'
+    Write-Host '   - rejestr/uslugi/zadania/powercfg/BCD: przywracane tylko z zapisanych stanow.'
     if ($failedNote) { Write-Warn ("  UWAGI:$failedNote") }
-    Write-Host '   - punkt przywracania systemu i katalog backupu rejestru NIE są usuwane.'
-    Write-Host '   - jeśli któryś krok się nie powiódł, wpis został w d01i_state.json — ponów cofanie.'
-    Write-Ok 'Cofanie zakończone (szczegóły powyżej). Zrestartuj komputer.'
+    Write-Host '   - punkt przywracania systemu i katalog backupu rejestru NIE sa usuwane.'
+    Write-Host '   - jesli ktorys krok sie nie powiodl, wpis zostal w d01i_state.json - ponow cofanie.'
+    Write-Ok 'Cofanie zakonczone (szczegoly powyzej). Zrestartuj komputer.'
     if(Read-YesNo 'Zrestartowac TERAZ?'){ Restart-Computer -Force }
 }
 
@@ -1466,7 +1466,7 @@ function Write-MenuCategory {
 function Show-Menu {
     $totalW = 96
     # Tytul wycentrowany
-    $title = "d01i tweakz  •  p  •  MENU"
+    $title = "d01i tweakz  -  p  -  MENU"
     $pad = [math]::Floor(($totalW - $title.Length)/2)
     Write-Host (" " * $pad + $title) -ForegroundColor Cyan
     Write-Host (" " * $pad + ("-" * $title.Length)) -ForegroundColor DarkCyan
@@ -1482,7 +1482,7 @@ function Show-Menu {
         if ($right) { Write-Host $right -ForegroundColor $col2 } else { Write-Host "" }
     }
 
-    Write-MenuCategory "PROFILE SZYBKIE  •  1-CLICK" "Cyan"
+    Write-MenuCategory "PROFILE SZYBKIE  -  1-CLICK" "Cyan"
     Row2 'S' 'SAFE - bezpieczny' 'Green' 'B' 'BALANCED - polecany 90%' 'Green'
     Row2 'A' 'ADVANCED - zaawansowany (PREMIUM)' 'Yellow' 'F' 'FULL - pelny (PREMIUM)' 'Green'
     Row2 '01' 'FULL alias 01 - ULTIMATE' 'Green' '' '' 'White'
@@ -1493,12 +1493,12 @@ function Show-Menu {
     Row2 '15' 'Kopiuj HWID' 'White' '' '' 'White'
     Write-Host ""
 
-    Write-MenuCategory "SIEĆ & PING" "DarkCyan"
+    Write-MenuCategory "SIEC & PING" "DarkCyan"
     Row2 '04' 'Siec TCP + Auto DNS' 'White' '13' 'Ping ogolny' 'White'
     Row2 '14' 'Ping serwerow gier' 'White' '' '' 'White'
     Write-Host ""
 
-    Write-MenuCategory "WYDAJNOŚĆ  •  GPU & CPU" "DarkCyan"
+    Write-MenuCategory "WYDAJNOSC  -  GPU & CPU" "DarkCyan"
     Row2 '03' 'Mouse Fix 1:1' 'White' '05' 'GPU HAGS + MSI + Cache' 'White'
     Row2 '11' 'NDIS latency' 'White' '12' 'Smart ISLC w tle' 'White'
     Row2 '17' 'Efekty wizualne OFF' 'White' '18' 'CPU MaxPerf (0x2A)' 'White'
@@ -1507,14 +1507,14 @@ function Show-Menu {
     Row2 '33' 'ProBalance' 'White' '' '' 'White'
     Write-Host ""
 
-    Write-MenuCategory "PRYWATNOŚĆ & SYSTEM" "DarkCyan"
+    Write-MenuCategory "PRYWATNOSC & SYSTEM" "DarkCyan"
     Write-Host ""
 
     Write-MenuCategory "SYSTEM" "DarkCyan"
     Row2 '20' 'Win11 menu + Reserved OFF' 'White' '21' 'Autostart' 'White'
     Row2 '16' 'COFNIJ WSZYSTKIE ZMIANY' 'Red' '0' 'Wyjscie' 'Red'
     Write-Host ""
-    Write-Host "  Wybierz [S/B/A/F/01-33/0]  •  SAFE=B  •  FULL=F" -ForegroundColor DarkGray
+    Write-Host "  Wybierz [S/B/A/F/01-33/0]  -  SAFE=B  -  FULL=F" -ForegroundColor DarkGray
 }
 
 

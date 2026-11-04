@@ -36,7 +36,7 @@ if ($p.Path -ne $meta.NodeExe) { $reasons += "sciezka exe inna niz zapisana ($($
 $expectedScript = Join-Path $InstallDir 'src\index.js'
 if ($meta.Script -ne $expectedScript) { $reasons += "zapisana sciezka skryptu niezgodna z instalacja" }
 
-# CommandLine jest OBOWIĄZKOWY: wyjatek / brak obiektu / null / pusty = nieudana weryfikacja.
+# CommandLine jest OBOWIAZKOWY: wyjatek / brak obiektu / null / pusty = nieudana weryfikacja.
 $cmdLine = $null
 $cimOk = $true
 try {
