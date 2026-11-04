@@ -133,7 +133,7 @@ $script:State = [ordered]@{
     HibernationWasEnabled=$null; Applied=@(); MsiTouched=@(); CreatedRegistryKeys=@()
     BcdUndo=@(); PowerUndo=@()
 }
-function Load-State {
+function Read-State {
     if (Test-Path -LiteralPath $script:StateFile) {
         try {
             $j = Get-Content -LiteralPath $script:StateFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -146,7 +146,7 @@ function Load-State {
         $script:State[$p] = @($script:State[$p])
     }
 }
-function Save-State {
+function Write-State {
     try { ($script:State | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $script:StateFile -Encoding UTF8 -Force } catch {}
 }
 
@@ -173,7 +173,7 @@ function Read-YesNo {
 }
 function Add-Applied {
     param([string]$Id)
-    if ($script:State.Applied -notcontains $Id) { $script:State.Applied += $Id; Save-State }
+    if ($script:State.Applied -notcontains $Id) { $script:State.Applied += $Id; Write-State }
     Write-Log $Id 'APPLY'
 }
 function Show-Section {
@@ -299,7 +299,7 @@ function Show-Hw {
 }
 
 # ====================== BACKUP ======================
-function Ensure-Backup {
+function Assert-Backup {
     if ($script:BackupDone) { return }
     Write-Step 'BACKUP: punkt przywracania + eksport rejestru'
     try {
@@ -330,10 +330,10 @@ function Ensure-Backup {
         & reg.exe export $k $f /y 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) { $ok++ } else { Remove-Item $f -Force -ErrorAction SilentlyContinue }
     }
-    $script:State.LastBackupDir = $dir; Save-State
+    $script:State.LastBackupDir = $dir; Write-State
     Write-Ok "Eksport rejestru: $ok galezi -> $dir"
     Write-Ok 'Backup gotowy.'
-    $script:BackupDone = $true; Save-State
+    $script:BackupDone = $true; Write-State
 }
 
 # ====================== GENERIC TWEAK HELPERS ======================
@@ -345,7 +345,7 @@ function Set-Reg {
         [AllowNull()]$Value,
         [ValidateSet('DWord','QWord','String','ExpandString','Binary')][string]$Type='DWord'
     )
-    Ensure-Backup
+    Assert-Backup
     $had=$false; $old=$null; $oldT='DWord'
     try {
         $key = Get-Item -LiteralPath $Path -ErrorAction Stop
@@ -362,7 +362,7 @@ function Set-Reg {
     } catch {}
     if (-not ($script:State.RegUndo | Where-Object { $_.Path -eq $Path -and $_.Name -eq $Name })) {
         $script:State.RegUndo += [pscustomobject]@{Path=$Path;Name=$Name;HadValue=$had;OldValue=$old;OldType=$oldT}
-        Save-State
+        Write-State
     }
     try {
         if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
@@ -380,7 +380,7 @@ function Remove-Reg {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Name
     )
-    Ensure-Backup
+    Assert-Backup
     $had=$false; $old=$null; $oldT='DWord'
     try {
         $e = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
@@ -388,7 +388,7 @@ function Remove-Reg {
     } catch {}
     if (-not ($script:State.RegUndo | Where-Object { $_.Path -eq $Path -and $_.Name -eq $Name })) {
         $script:State.RegUndo += [pscustomobject]@{Path=$Path;Name=$Name;HadValue=$had;OldValue=$old;OldType=$oldT}
-        Save-State
+        Write-State
     }
     if (-not $had) { Write-Info "REG: $Name nie istnieje - pomijam."; return }
     try {
@@ -399,14 +399,14 @@ function Remove-Reg {
 function Set-Svc {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Name,[Parameter(Mandatory)][ValidateSet('Disabled','Manual','Automatic')][string]$Start,[string]$Desc='')
-    Ensure-Backup
+    Assert-Backup
     $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if (-not $svc) { Write-Info "Usluga $Name nie istnieje - pomijam."; return }
     $w = Get-CimInstance Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
     $oldM = if ($w) { $w.StartMode } elseif ($svc.PSObject.Properties['StartType']) { $svc.StartType.ToString() } else { 'Manual' }
     if (-not ($script:State.ServiceUndo | Where-Object { $_.Name -eq $Name })) {
         $script:State.ServiceUndo += [pscustomobject]@{Name=$Name;OldMode=$oldM;WasRunning=($svc.Status -eq 'Running')}
-        Save-State
+        Write-State
     }
     try {
         if ($Start -ne 'Automatic') { Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue }
@@ -417,7 +417,7 @@ function Set-Svc {
 function Set-Task {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Full,[Parameter(Mandatory)][ValidateSet('Disable','Enable')][string]$Action)
-    Ensure-Backup
+    Assert-Backup
     $dir = $Full.Substring(0,$Full.LastIndexOf('\')+1)
     $n = $Full.Substring($Full.LastIndexOf('\')+1)
     try { $t = Get-ScheduledTask -TaskPath $dir -TaskName $n -ErrorAction Stop } catch { Write-Info "Zadanie nie istnieje: $Full"; return }
@@ -425,11 +425,11 @@ function Set-Task {
     try {
         if ($Action -eq 'Disable') {
             Disable-ScheduledTask -TaskPath $dir -TaskName $n -ErrorAction Stop | Out-Null
-            if ($script:State.DisabledTasks -notcontains $Full) { $script:State.DisabledTasks += $Full; Save-State }
+            if ($script:State.DisabledTasks -notcontains $Full) { $script:State.DisabledTasks += $Full; Write-State }
             Write-Ok "TASK wylaczone: $n"
         } else {
             Enable-ScheduledTask -TaskPath $dir -TaskName $n -ErrorAction Stop | Out-Null
-            $script:State.DisabledTasks = @($script:State.DisabledTasks -ne $Full); Save-State
+            $script:State.DisabledTasks = @($script:State.DisabledTasks -ne $Full); Write-State
             Write-Ok "TASK wlaczone: $n"
         }
     } catch { Write-Warn "TASK ${n} : $($_.Exception.Message)" }
@@ -446,12 +446,12 @@ function Get-BcdValue {
 function Set-BcdSetting {
     param([string]$Setting, [string]$Value)
     if ($script:DryRun) { Write-Info ("[DRY-RUN] bcdedit /set {0} {1}" -f $Setting, $Value); return }
-    Ensure-Backup
+    Assert-Backup
     $dup = @($script:State.BcdUndo | Where-Object { $_.Setting -eq $Setting } | Select-Object -First 1)
     if ($dup.Count -eq 0) {
         $old = Get-BcdValue -Setting $Setting
         $script:State.BcdUndo += [pscustomobject]@{ Setting=$Setting; OldValue=$old; OldExisted=($null -ne $old) }
-        Save-State
+        Write-State
     }
     & bcdedit.exe /set $Setting $Value 2>&1 | Out-Null
 }
@@ -485,12 +485,12 @@ function Set-Power {
     [CmdletBinding()]
     param([string]$SubG,[string]$Setting,[string]$Val,[ValidateSet('AC','DC')][string]$AcDc='AC')
     if ($script:DryRun) { Write-Info ("[DRY-RUN] powercfg /set{0}valueindex {1} {2} {3}" -f $AcDc.ToLower(),$SubG,$Setting,$Val); return $true }
-    Ensure-Backup
+    Assert-Backup
     $dup = @($script:State.PowerUndo | Where-Object { $_.SubG -eq $SubG -and $_.Setting -eq $Setting -and $_.Scope -eq $AcDc } | Select-Object -First 1)
     if ($dup.Count -eq 0) {
         $old = Get-PowerVal -SubG $SubG -Setting $Setting -Scope $AcDc
         $script:State.PowerUndo += [pscustomobject]@{ SubG=$SubG; Setting=$Setting; Scope=$AcDc; OldValue=$old; OldExisted=($null -ne $old) }
-        Save-State
+        Write-State
     }
     $flag = if ($AcDc -eq 'DC') {'/setdcvalueindex'} else {'/setacvalueindex'}
     & powercfg.exe $flag SCHEME_CURRENT $SubG $Setting $Val 2>&1 | Out-Null
@@ -514,7 +514,7 @@ function Restore-PowerUndo {
 # ====================== TWEAKI ======================
 function Enable-Ultimate {
     Write-Step 'Plan zasilania: ULTIMATE PERFORMANCE'
-    Ensure-Backup
+    Assert-Backup
 
     $templateGuid = 'e9a42b02-d5df-448d-aa00-03f14749eb61'
     $g = [string]$script:State.UltimateSchemeGuid
@@ -525,7 +525,7 @@ function Enable-Ultimate {
         $activeMatch = [regex]::Match(($active -join "`n"), '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b')
         if ($activeMatch.Success) {
             $script:State.PreviousPowerScheme = $activeMatch.Value
-            Save-State
+            Write-State
         }
     }
 
@@ -544,7 +544,7 @@ function Enable-Ultimate {
         $g = $guidMatch.Value
         $script:State.CreatedUltimate = $true
         $script:State.UltimateSchemeGuid = $g
-        Save-State
+        Write-State
         Write-Ok 'Odblokowano plan Ultimate Performance.'
     }
 
@@ -573,10 +573,10 @@ function Enable-Ultimate {
 }
 function Disable-Hibernation {
     Write-Step 'Hibernacja/Fast Startup: WYLACZENIE'
-    Ensure-Backup
+    Assert-Backup
     if ($null -eq $script:State.HibernationWasEnabled) {
         $script:State.HibernationWasEnabled = Test-Path "$env:SystemDrive\hiberfil.sys"
-        Save-State
+        Write-State
     }
     & powercfg.exe /hibernate off 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
@@ -685,7 +685,7 @@ function Set-AutoDns {
     }
     if (-not $best) { Write-Warn 'Nie mozna sprawdzic DNS.'; return }
     Write-Ok "Najszybszy: $($best.N) ($bestMs ms)"
-    Ensure-Backup
+    Assert-Backup
     Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
         Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ($best.A,$best.B) -ErrorAction SilentlyContinue
     }
@@ -693,7 +693,7 @@ function Set-AutoDns {
 }
 function Set-MsiMode {
     Write-Step 'MSI Mode dla GPU/NIC/dyskow (niskie DPC)'
-    Ensure-Backup
+    Assert-Backup
     $paths = Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Enum\PCI' -Recurse -ErrorAction SilentlyContinue | Where-Object {
         try { Get-ItemProperty $_.PSPath DeviceParameters -ErrorAction Stop; $true } catch { $false }
     }
@@ -713,7 +713,7 @@ function Set-MsiMode {
             }
         } catch {}
     }
-    Save-State
+    Write-State
     Write-Ok "MSI Mode wlaczony dla $n urzadzen (restart wymagany)."
     $script:RebootNeeded=$true; Add-Applied 'tweak-msi'
 }
@@ -721,7 +721,7 @@ function Set-MsiMode {
 # ====================== MOCNE TWEAKI COMPETITIVE ======================
 function Disable-CoreParking {
     Write-Step 'CPU: Core Parking OFF'
-    Ensure-Backup
+    Assert-Backup
     try {
         foreach ($setting in @('CPMINCORES','CPMAXCORES')) {
             [void](Set-Power -SubG 'SUB_PROCESSOR' -Setting $setting -Val '100' -AcDc AC)
@@ -735,7 +735,7 @@ function Disable-CoreParking {
 }
 function Set-NetworkLatency {
     Write-Step 'Siec: NDIS latency off (GSO/LSO/RSC/InterruptModeration)'
-    Ensure-Backup
+    Assert-Backup
     $changed=0
     try {
         $nics = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up'
@@ -765,7 +765,7 @@ function Set-NetworkLatency {
 }
 function Disable-FullscreenOpt {
     Write-Step 'Gry: Fullscreen Optimizations OFF globalnie'
-    Ensure-Backup
+    Assert-Backup
     $root='HKCU:\System\GameConfigStore'
     Set-Reg $root GameDVR_FSEBehaviorMode 2 DWord
     Set-Reg $root GameDVR_FSEBehavior 2 DWord
@@ -777,7 +777,7 @@ function Disable-FullscreenOpt {
 }
 function Disable-WidgetsCopilot {
     Write-Step 'UI: Widgety/Copilot/Teams autostart OFF'
-    Ensure-Backup
+    Assert-Backup
     $policies='HKCU:\SOFTWARE\Policies\Microsoft\Windows'
     New-Item "$policies\Windows Copilot" -Force -ErrorAction SilentlyContinue | Out-Null
     Set-Reg "$policies\Windows Copilot" TurnOffWindowsCopilot 1 DWord
@@ -804,7 +804,7 @@ function Disable-StickyKeys {
 }
 function Disable-VisualFX {
     Write-Step 'System: WSZYSTKIE animacje/efekty wizualne OFF'
-    Ensure-Backup
+    Assert-Backup
     # Wylacz cienie, animacje okien, fade/slide, przezroczystosc, Aero Shake, menu animacje
     Set-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' VisualFXSetting 2 DWord
     Set-Reg 'HKCU:\Control Panel\Desktop' DragFullWindows 0 String
@@ -865,14 +865,14 @@ namespace D01iGP {
 }
 function Disable-Win11Context {
     Write-Step 'Windows 11: Stare menu kontekstowe (bez "Pokaz wiecej opcji")'
-    Ensure-Backup
+    Assert-Backup
     if((Get-CimInstance Win32_OperatingSystem).BuildNumber -ge 22000){
         $contextPath = 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32'
         if (-not (Test-Path -LiteralPath $contextPath)) {
             New-Item -Path $contextPath -Force -ErrorAction Stop | Out-Null
             if ($script:State.CreatedRegistryKeys -notcontains $contextPath) {
                 $script:State.CreatedRegistryKeys += $contextPath
-                Save-State
+                Write-State
             }
         }
         Set-Reg $contextPath '(default)' '' String
@@ -883,7 +883,7 @@ function Disable-Win11Context {
 }
 function Disable-ReservedStorage {
     Write-Step 'Dysk: wylacz Reserved Storage (zwalnia 2-7 GB)'
-    Ensure-Backup
+    Assert-Backup
     $path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager'
     Set-Reg -Path $path -Name ShippedWithReserves -Value 0 -Type DWord
     $disabled = $false
@@ -903,7 +903,7 @@ function Disable-ReservedStorage {
 function Set-AutostartGame {
     Write-Step 'Autostart: Smart ISLC + ProBalance + Game Priority po logowaniu'
     if (-not $script:Licensed) { Write-Err 'Autostart wymaga aktywnej pelnej licencji.'; return }
-    Ensure-Backup
+    Assert-Backup
 
     $ps1Path = Join-Path $script:Root 'premium.ps1'
     if (-not (Test-Path -LiteralPath $ps1Path)) { Write-Err "Nie znaleziono skryptu: $ps1Path"; return }
@@ -931,7 +931,7 @@ function Set-AutostartGame {
 }
 function Disable-DiscordAccel {
     Write-Step 'Discord/Electron: wylaczenie akceleracji sprzetowej (mniej GPU w tle)'
-    Ensure-Backup
+    Assert-Backup
     $paths = @(
         "$env:APPDATA\discord\settings.json",
         "$env:APPDATA\DiscordCanary\settings.json",
@@ -956,7 +956,7 @@ function Disable-DiscordAccel {
 }
 function Set-NvidiaShaderCache {
     Write-Step 'NVIDIA: katalog cache shaderow + ustawienia telemetryczne'
-    Ensure-Backup
+    Assert-Backup
     try {
         if($script:Hw -and $script:Hw.GpuVendor -eq 'NVIDIA'){
             $nvprefs = "$env:LOCALAPPDATA\NVIDIA Corporation\DXCache"
@@ -974,7 +974,7 @@ function Set-NvidiaShaderCache {
 }
 function Disable-DeliveryOptimization {
     Write-Step 'Delivery Optimization P2P OFF'
-    Ensure-Backup
+    Assert-Backup
     Set-Svc DoSvc Disabled 'Delivery Optimization'
     Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config' DODownloadMode 0 DWord
     Set-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' DODownloadMode 0 DWord
@@ -1065,7 +1065,7 @@ namespace D01iSLC {
 }
 function Disable-USBSelectiveSuspend {
     Write-Step 'USB: Selective Suspend OFF (mysz/klawiatura nie idzie spac)'
-    Ensure-Backup
+    Assert-Backup
     # Wylacz w planie zasilania
     & powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
     & powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
@@ -1076,7 +1076,7 @@ function Disable-USBSelectiveSuspend {
 }
 function Set-SSDTweaks {
     Write-Step 'Dysk SSD/NVMe: optymalizacja zapisow'
-    Ensure-Backup
+    Assert-Backup
     $fs='HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
     Set-Reg $fs NtfsDisableLastAccessUpdate 1 DWord  # wylacz znacznik ostatniego dostepu
     Set-Reg $fs NtfsMemoryUsage 2 DWord             # cache NTFS na maksa
@@ -1090,7 +1090,7 @@ function Set-SSDTweaks {
 }
 function Disable-EdgePreload {
     Write-Step 'Edge Startup Boost i widgety OFF'
-    Ensure-Backup
+    Assert-Backup
     $edge='HKLM:\SOFTWARE\Policies\Microsoft\Edge'
     if(-not (Test-Path $edge)){New-Item $edge -Force | Out-Null}
     Set-Reg $edge StartupBoostEnabled 0 DWord
@@ -1122,7 +1122,7 @@ function Set-GameServerPing {
                 $avg=[math]::Round(($pings|Measure-Object -Average).Average,1)
                 $min=($pings|Measure-Object -Minimum).Minimum
                 $max=($pings|Measure-Object -Maximum).Maximum
-                $jitter=[math]::Round(($pings|ForEach-Object -Begin {$l=$null}{if($l){[math]::Abs($_-$l)}$l=$_}|Measure-Object -Average).Average,1)
+                $jitter=[math]::Round(($pings|ForEach-Object -Begin {$prev=$null}{if($prev){[math]::Abs($_-$prev)}$prev=$_}|Measure-Object -Average).Average,1)
                 $color=if($avg -lt 30 -and $jitter -lt 4){'Green'}elseif($avg -lt 70){'Yellow'}else{'Red'}
                 Write-Host "   $($t.N)".PadRight(22) -ForegroundColor White -NoNewline
                 Write-Host "avg=$avg  min=$min  max=$max  jitter=$jitter ms" -ForegroundColor $color
@@ -1140,7 +1140,7 @@ function Copy-HwidToClipboard {
 }
 function Set-MouseMenuDelay {
     Write-Step 'Mysz: 0ms opoznienia menu'
-    Ensure-Backup
+    Assert-Backup
     Set-Reg 'HKCU:\Control Panel\Desktop' MenuShowDelay 0 String
     Set-Reg 'HKCU:\Control Panel\Mouse' MouseHoverTime 0 String
     Set-Reg 'HKCU:\Control Panel\Mouse' DoubleClickSpeed 50 String
@@ -1165,7 +1165,7 @@ function Test-NetworkPing {
                 $avg=[math]::Round(($pings|Measure-Object -Average).Average,1)
                 $min=($pings|Measure-Object -Minimum).Minimum
                 $max=($pings|Measure-Object -Maximum).Maximum
-                $jitter=[math]::Round(($pings|ForEach-Object -Begin {$l=$null}{if($l){[math]::Abs($_-$l)}$l=$_}|Measure-Object -Average).Average,1)
+                $jitter=[math]::Round(($pings|ForEach-Object -Begin {$prev=$null}{if($prev){[math]::Abs($_-$prev)}$prev=$_}|Measure-Object -Average).Average,1)
                 $loss=(5-$pings.Count)*20
                 $color=if($avg -lt 30 -and $jitter -lt 5){'Green'}elseif($avg -lt 80){'Yellow'}else{'Red'}
                 Write-Host "   $($t.N)".PadRight(18) -ForegroundColor White -NoNewline
@@ -1262,7 +1262,7 @@ function Invoke-Undo {
         VbsDisabled=$false; CreatedUltimate=$false; UltimateSchemeGuid=''; PreviousPowerScheme=''
         HibernationWasEnabled=$null; Applied=@(); MsiTouched=@(); CreatedRegistryKeys=@()
     }
-    Save-State
+    Write-State
     $script:BackupDone=$false
     $script:RebootNeeded=$true
     Write-Host ''
@@ -1372,7 +1372,7 @@ function Show-Progress {
 function Invoke-ProfileSafe {
     # DEMO/SAFE: tylko bezpieczne, uniwersalne optymalizacje (bez licencji lub z licencja).
     Write-Step 'PROFIL SAFE (bezpieczny)'
-    Ensure-Backup
+    Assert-Backup
     Set-Power 'HighPerformance'
     Disable-VisualFX
     Disable-WidgetsCopilot
@@ -1382,7 +1382,7 @@ function Invoke-ProfileSafe {
 function Invoke-ProfileBalanced {
     if (-not (Assert-Premium -Feature 'Profil BALANCED')) { Wait-Enter; return }
     Write-Step 'PROFIL BALANCED (polecany)'
-    Ensure-Backup
+    Assert-Backup
     Set-Power 'HighPerformance'
     Set-Network
     Set-AutoDns
@@ -1396,7 +1396,7 @@ function Invoke-ProfileBalanced {
 function Invoke-ProfileAdvanced {
     if (-not (Assert-Premium -Feature 'Profil ADVANCED')) { Wait-Enter; return }
     Write-Step 'PROFIL ADVANCED (wymaga PREMIUM, online)'
-    Ensure-Backup
+    Assert-Backup
     Invoke-ProfileBalancedSafe
     Set-MsiMode
     Set-Hags
@@ -1412,7 +1412,7 @@ function Invoke-ProfileBalancedSafe {
 function Invoke-FullProfile {
     if (-not (Assert-Premium -Feature 'Profil FULL')) { Wait-Enter; return }
     Write-Step 'PROFIL FULL (wymaga PREMIUM, online)'
-    Ensure-Backup
+    Assert-Backup
     Invoke-ProfileBalancedSafe
     Set-MsiMode; Set-Hags; Set-NetworkLatency; Invoke-ProBalance
     Invoke-GamePriorityWatcher; Invoke-SmartISLC
@@ -1520,7 +1520,7 @@ function Show-Menu {
 
 # ====================== START ======================
 Write-Log '========== d01i tweakz p START =========='
-Load-State
+Read-State
 Invoke-Preflight
 $script:Hw = Get-Hardware
 
@@ -1568,7 +1568,7 @@ do {
         '05' { if(Assert-Premium){Set-Hags;Set-MsiMode;if($script:Hw){if($script:Hw.GpuVendor -eq 'NVIDIA'){Set-Nvidia}elseif($script:Hw.GpuVendor -eq 'AMD'){Set-Amd}} }; Wait-Enter }
         '08' { Invoke-SelfTest }
         '09' { New-Diag }
-        '11' { if(Assert-Premium){ Ensure-Backup; Set-NetworkLatency; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
+        '11' { if(Assert-Premium){ Assert-Backup; Set-NetworkLatency; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
         '12' { Invoke-SmartISLC; Wait-Enter }
         '13' { Test-NetworkPing }
         '30' { if(Assert-Premium){ Disable-DiscordAccel; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
