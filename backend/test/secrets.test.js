@@ -63,3 +63,49 @@ test('nieprawidlowy SECRET_ENC_KEY (zla dlugosc) odmawia startu konfiguracji', a
   assert.ok(err, 'krotki klucz musi odmowic startu');
   assert.match(String(err.stderr || err.message), /SECRET_ENC_KEY/);
 });
+
+test('R4: verifySecretKeyIntegrity - poprawny klucz przechodzi, zly (ale poprawny format) odpada', async () => {
+  const { verifySecretKeyIntegrity } = await import('../src/services/secretMigrationService.js');
+  const { encryptSecret } = await import('../src/utils/secretCrypto.js');
+  // rekord zaszyfrowany Biezacym kluczem testowym ('a'*64) - weryfikacja przechodzi
+  await t.query(
+    `INSERT INTO admins (username, password_hash, totp_secret, totp_enabled) VALUES ('encok', 'x', $1, TRUE)`,
+    [encryptSecret('sekret-z-biezacym-kluczem')]
+  );
+  const ok = await verifySecretKeyIntegrity();
+  assert.ok(ok.verified >= 1);
+
+  // rekord zaszyfrowany INNYM kluczem (ale poprawnym formatem) -> weryfikacja musi sie nie powiesc
+  const wrongKey = 'b'.repeat(64);
+  const { createCipheriv, randomBytes } = await import('node:crypto');
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', Buffer.from(wrongKey, 'hex'), iv);
+  const ct = Buffer.concat([c.update('inny-sekret', 'utf8'), c.final()]);
+  const foreign = `enc:v1:${iv.toString('base64')}:${c.getAuthTag().toString('base64')}:${ct.toString('base64')}`;
+  await t.query(
+    `INSERT INTO admins (username, password_hash, totp_secret, totp_enabled) VALUES ('encforeign', 'x', $1, TRUE)`,
+    [foreign]
+  );
+  await assert.rejects(() => verifySecretKeyIntegrity(), /SECRET_ENC_KEY nie odszyfrowuje/);
+  // dane NIE zostaly zmodyfikowane przez nieudana weryfikacje
+  const row = await t.query(`SELECT totp_secret FROM admins WHERE username='encforeign'`);
+  assert.equal(row.rows[0].totp_secret, foreign);
+});
+
+test('R4: SECRET_ENC_KEY 64-znakowy HEX przechodzi walidacje backendu (jak klucz z instalatora)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  // symulacja wartosci z New-SecureRandomHex 32 (32 bajty -> 64 znaki HEX)
+  const key64 = '0123456789abcdef'.repeat(4);
+  execFileSync(process.execPath, ['-e', `process.env.SECURITY_PEPPER='x';process.env.SECRET_ENC_KEY='${key64}';process.env.ALLOW_EPHEMERAL_KEYS='true';import('./src/config/index.js').then(()=>console.log('CONFIG_OK'))`], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: { ...process.env }, encoding: 'utf8', timeout: 30000,
+  });
+});
+
+test('R4: instalator Windows generuje SECRET_ENC_KEY jako 32 bajty (statyczna kontrola pliku)', async () => {
+  const fs = await import('node:fs');
+  const ps1 = fs.readFileSync(new URL('../../deploy/windows/Install-Windows.ps1', import.meta.url), 'utf8');
+  assert.ok(!ps1.includes('New-SecureRandomString'), 'brak starej funkcji New-SecureRandomString');
+  assert.match(ps1, /\$encKey = New-SecureRandomHex 32/, 'SECRET_ENC_KEY = 32 bajty = 64 znaki HEX');
+  assert.match(ps1, /function New-SecureRandomHex\(\[int\]\$ByteCount/, 'parametr funkcji to liczba bajtow');
+});

@@ -43,3 +43,41 @@ test('rownolegle uruchomienie migratora nie duplikuje migracji (advisory lock)',
   const applied = await t.query(`SELECT name, count(*)::int AS n FROM schema_migrations GROUP BY name HAVING count(*) > 1`);
   assert.equal(applied.rows.length, 0, 'żadna migracja nie zostala zapisana dwa razy');
 });
+
+test('R4: prawdziwa wspolbieznosc migratora - cztery niezalezne procesy na CZYSTEJ bazie', async () => {
+  // Osobna, czysta baza bez schema_migrations (nie ta z before()).
+  const { execFileSync, spawn } = await import('node:child_process');
+  const raceDb = 'postgresql://postgres@/d01i_test_migrace?host=/tmp/d01i-pgdata';
+  const { Pool } = await import('pg');
+  const admin = new Pool({ connectionString: 'postgresql://postgres@/postgres?host=/tmp/d01i-pgdata' });
+  await admin.query('DROP DATABASE IF EXISTS d01i_test_migrace');
+  await admin.query('CREATE DATABASE d01i_test_migrace');
+  await admin.end();
+
+  // 4 niezalezne procesy jednoczesnie migruja pusta baze
+  const procs = Array.from({ length: 4 }, () =>
+    spawn(process.execPath, ['test/migrator-race-child.mjs'], {
+      cwd: new URL('..', import.meta.url).pathname,
+      env: { ...process.env, DATABASE_URL: raceDb, SECURITY_PEPPER: 'x', SECRET_ENC_KEY: 'a'.repeat(64), ALLOW_EPHEMERAL_KEYS: 'true' },
+      stdio: 'pipe',
+    })
+  );
+  const results = await Promise.all(procs.map((pr) => new Promise((resolve) => {
+    let out = '';
+    pr.stdout.on('data', (d) => (out += d));
+    pr.stderr.on('data', (d) => (out += d));
+    pr.on('close', (code) => resolve({ code, out }));
+  })));
+  for (const r of results) assert.equal(r.code, 0, `proces migratora zakonczyl sie bledem: ${r.out.slice(-300)}`);
+
+  const check = new Pool({ connectionString: raceDb });
+  const names = await check.query('SELECT name, count(*)::int AS n FROM schema_migrations GROUP BY name HAVING count(*) > 1');
+  assert.equal(names.rows.length, 0, 'kazda migracja w schema_migrations dokladnie raz');
+  const total = await check.query('SELECT count(*)::int AS n FROM schema_migrations');
+  assert.equal(total.rows[0].n, 2, 'wszystkie migracje zastosowane');
+  const tables = await check.query(`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema='public'`);
+  assert.ok(tables.rows[0].n >= 8, 'schemat kompletny');
+  const constr = await check.query(`SELECT count(*)::int AS n FROM information_schema.table_constraints WHERE constraint_name='licenses_max_devices_check'`);
+  assert.equal(constr.rows[0].n, 1, 'migracja 0002 zastosowana (CHECK max_devices<=2)');
+  await check.end();
+});

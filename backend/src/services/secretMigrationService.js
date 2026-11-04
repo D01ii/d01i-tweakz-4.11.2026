@@ -36,3 +36,29 @@ export async function migrateLegacySecrets({ log = console.log } = {}) {
   }
   return { adminSecrets: admins.rows.length };
 }
+
+/**
+ * R4: weryfikacja SECRET_ENC_KEY wzledem WSZYSTKICH istniejacych zaszyfrowanych sekretow.
+ * Polega na rzeczywistym odszyfrowaniu AES-256-GCM (nie na formacie klucza).
+ * Nie loguje plaintextu. Rzuca blad, jesli ktoregokolwiek rekordu nie da sie odszyfrowac.
+ * Uruchamiana po migracjach schematu, PRZED startem HTTP.
+ */
+export async function verifySecretKeyIntegrity() {
+  const admins = await query(`SELECT id, totp_secret FROM admins WHERE totp_secret LIKE 'enc:v1:%'`);
+  for (const row of admins.rows) {
+    try {
+      decryptSecret(row.totp_secret);
+    } catch {
+      throw new Error(`SECRET_ENC_KEY nie odszyfrowuje istniejacego totp_secret (admin ${row.id}). Przywroc oryginalny klucz - NIE uruchamiam serwera.`);
+    }
+  }
+  const wh = await query(`SELECT value FROM settings WHERE key='discord_webhook' AND value::text LIKE '%enc:v1:%'`);
+  for (const row of wh.rows) {
+    try {
+      if (row.value?.url) decryptSecret(row.value.url);
+    } catch {
+      throw new Error('SECRET_ENC_KEY nie odszyfrowuje istniejacego webhook URL. Przywroc oryginalny klucz - NIE uruchamiam serwera.');
+    }
+  }
+  return { verified: admins.rows.length + wh.rows.length };
+}

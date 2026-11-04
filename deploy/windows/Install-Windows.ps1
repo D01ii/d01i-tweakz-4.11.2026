@@ -22,9 +22,11 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 
-function New-SecureRandomString([int]$Length = 32) {
+function New-SecureRandomHex([int]$ByteCount = 32) {
     # Kryptograficznie bezpieczny generator (CSPRNG), niezalezny od openssl.
-    $bytes = New-Object byte[] $Length
+    # Parametr to LICZBA BAJTOW; zwracamy HEX (2 znaki na bajt).
+    # 32 bajty -> 64 znaki HEX (wymagane dla SECRET_ENC_KEY / AES-256).
+    $bytes = New-Object byte[] $ByteCount
     $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
     try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     return ([BitConverter.ToString($bytes)).Replace('-', '').ToLowerInvariant()
@@ -116,14 +118,18 @@ function Configure-Database {
     $exists = Invoke-Psql "SELECT 1 FROM pg_roles WHERE rolname='$DbUser'"
     $dbPassFile = "$env:ProgramData\D01iTweakz\.db_password"
     if ($exists -ne '1') {
-        $dbPass = New-SecureRandomString 48
+        $dbPass = New-SecureRandomHex 48      # haslo DB: 48 bajtow
         Invoke-Psql "CREATE ROLE $DbUser LOGIN PASSWORD '$dbPass' NOSUPERUSER NOCREATEDB NOCREATEROLE" | Out-Null
         $dbPass | Out-File -FilePath $dbPassFile -Encoding ascii -NoNewline
         Write-Info "Utworzono użytkownika bazy $DbUser."
     } else {
         Write-Info "Użytkownik bazy już istnieje."
         $dbPass = Get-Content $dbPassFile -ErrorAction SilentlyContinue
-        if (-not $dbPass) { $dbPass = New-SecureRandomString 48; Invoke-Psql "ALTER ROLE $DbUser PASSWORD '$dbPass'" | Out-Null; $dbPass | Out-File $dbPassFile -Encoding ascii -NoNewline }
+        if (-not $dbPass) {
+            $dbPass = New-SecureRandomHex 48   # haslo DB: 48 bajtow
+            Invoke-Psql "ALTER ROLE $DbUser PASSWORD '$dbPass'" | Out-Null
+            $dbPass | Out-File $dbPassFile -Encoding ascii -NoNewline
+        }
     }
     $dbExists = Invoke-Psql "SELECT 1 FROM pg_database WHERE datname='$DbName'"
     if ($dbExists -ne '1') {
@@ -145,9 +151,18 @@ function New-SecretsAndKeys($dbPass) {
         if (-not (Test-Path "$KeysDir\ed25519_private.pem")) { throw "Generowanie kluczy Ed25519 nieudane." }
     }
     if (-not (Test-Path $EnvFile)) {
-        $pepper = New-SecureRandomString 64
-        $encKey = New-SecureRandomString 64   # SECRET_ENC_KEY: 64 znaki HEX = 32 bajty (AES-256-GCM)
-        $bootstrapPass = New-SecureRandomString 32
+        # R4: brak .env + zaszyfrowane rekordy w bazie = brak oryginalnego klucza -> STOP.
+        $psql = Get-PsqlPath
+        $encRows = & $psql -U postgres -h 127.0.0.1 -d $DbName -tAc "SELECT (SELECT count(*) FROM admins WHERE totp_secret LIKE 'enc:v1:%') + (SELECT count(*) FROM settings WHERE key='discord_webhook' AND value::text LIKE '%enc:v1:%')" 2>$null
+        if ($LASTEXITCODE -ne 0) { Write-Err2 "Nie mozna polaczyc z baza $DbName - nie generuje nowego SECRET_ENC_KEY (blad DB != 0 rekordow)."; exit 1 }
+        if ([int]($encRows | Select-Object -First 1) -gt 0) {
+            Write-Err2 "Baza zawiera zaszyfrowane sekrety (enc:v1:), ale brak pliku .env z SECRET_ENC_KEY."
+            Write-Err2 "Przywroc oryginalny klucz (64 znaki HEX) do $EnvFile - nowy klucz uniemozliwi odczyt danych."
+            exit 1
+        }
+        $pepper = New-SecureRandomHex 64      # SECURITY_PEPPER: 64 bajty
+        $encKey = New-SecureRandomHex 32      # SECRET_ENC_KEY: 32 bajty = 64 znaki HEX (AES-256-GCM)
+        $bootstrapPass = New-SecureRandomHex 32  # haslo bootstrap admina
         @"
 NODE_ENV=development
 PORT=$Port
@@ -180,7 +195,7 @@ DISCORD_WEBHOOK_ENABLED=false
                 Write-Err2 "Przywroc oryginalny klucz (64 znaki HEX) do $EnvFile - nowy klucz uniemozliwi odczyt danych."
                 exit 1
             }
-            $encKey = New-SecureRandomString 64
+            $encKey = New-SecureRandomHex 32      # SECRET_ENC_KEY: 32 bajty = 64 znaki HEX
             Add-Content -Path $EnvFile -Value "SECRET_ENC_KEY=$encKey"
             Write-Info "Dodano SECRET_ENC_KEY do istniejacego .env (w bazie nie bylo zaszyfrowanych sekretow)."
         }

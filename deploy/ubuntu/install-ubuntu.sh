@@ -81,6 +81,22 @@ configure_postgres() {
   su - postgres -c "psql -c \"ALTER ROLE ${DB_USER} NOSUPERUSER NOCREATEDB NOCREATEROLE;\"" || true
 }
 
+
+count_encrypted_rows() {
+  # Zwraca liczbe rekordow enc:v1: albo wychodzi z bledem, gdy baza jest niedostepna.
+  # NIGDY nie traktuj bledu polaczenia jako "0 rekordow".
+  local out
+  if ! out="$(su - postgres -c "psql -d ${DB_NAME} -tAc \"SELECT (SELECT count(*) FROM admins WHERE totp_secret LIKE 'enc:v1:%') + (SELECT count(*) FROM settings WHERE key='discord_webhook' AND value::text LIKE '%enc:v1:%')\"" 2>/dev/null)"; then
+    return 1
+  fi
+  # brak tabel (swieza baza przed migracjami) tez nie jest bledem polaczenia
+  if ! echo "${out}" | grep -qE '^[0-9]+$'; then
+    if echo "${out}" | grep -qi 'does not exist'; then echo 0; return 0; fi
+    return 1
+  fi
+  echo "${out}" | tail -1
+}
+
 ensure_config_dirs() {
   # A1: /etc/d01i-tweakz musi istnieć przed pierwszym zapisem sekretu (.db_password w configure_postgres).
   if [ ! -d "/etc/${APP_NAME}" ]; then
@@ -125,6 +141,17 @@ generate_secrets_and_keys() {
   PEPPER="$(openssl rand -hex 32)"
   ENC_KEY="$(openssl rand -hex 32)"   # 64 znaki HEX = 32 bajty (AES-256-GCM)
   if [ ! -f "${ENV_FILE}" ]; then
+    # R4: brak .env + zaszyfrowane rekordy w bazie = brak oryginalnego klucza -> STOP.
+    if ! ENC_ROWS="$(count_encrypted_rows)"; then
+      err "Nie mozna polaczyc z baza ${DB_NAME} ani odczytac liczby zaszyfrowanych rekordow."
+      err "Nie generuje nowego SECRET_ENC_KEY, bo blad DB nie oznacza '0 rekordow'. Uruchom ponownie po naprawie polaczenia."
+      exit 1
+    fi
+    if [ "${ENC_ROWS}" -gt 0 ]; then
+      err "Baza zawiera ${ENC_ROWS} zaszyfrowanych sekretow (enc:v1:), ale brak ${ENV_FILE} z SECRET_ENC_KEY."
+      err "Przywroc oryginalny klucz (64 znaki HEX) - nowy klucz uniemozliwi odczyt danych."
+      exit 1
+    fi
     DB_PASS="$(cat /etc/${APP_NAME}/.db_password)"
     cat > "${ENV_FILE}" <<EOF
 NODE_ENV=production
@@ -149,8 +176,11 @@ EOF
     log "Plik ${ENV_FILE} już istnieje - pozostawiam bez zmian."
     if ! grep -q '^SECRET_ENC_KEY=[0-9a-f]\{64\}$' "${ENV_FILE}"; then
       # Jezeli w bazie sa juz zaszyfrowane sekrety, brak klucza uniemozliwi ich odczyt.
-      ENC_ROWS="$(su - postgres -c "psql -d ${DB_NAME} -tAc \"SELECT (SELECT count(*) FROM admins WHERE totp_secret LIKE 'enc:v1:%') + (SELECT count(*) FROM settings WHERE key='discord_webhook' AND value::text LIKE '%enc:v1:%')\"" 2>/dev/null || echo 0)"
-      if [ "${ENC_ROWS:-0}" -gt 0 ]; then
+      if ! ENC_ROWS="$(count_encrypted_rows)"; then
+        err "Nie mozna zweryfikowac liczby zaszyfrowanych rekordow w ${DB_NAME} - przerywam (blad DB != 0)."
+        exit 1
+      fi
+      if [ "${ENC_ROWS}" -gt 0 ]; then
         err "W bazie istnieja zaszyfrowane sekrety, ale ${ENV_FILE} nie zawiera poprawnego SECRET_ENC_KEY."
         err "Wygenerowanie nowego klucza uniemozliwiloby odczyt istniejacych danych."
         err "Przywroc oryginalny SECRET_ENC_KEY (32 bajty HEX) do ${ENV_FILE} i uruchom ponownie."

@@ -109,54 +109,49 @@ export async function activate({ key, installId, hwid, label = null, ipHash = nu
         });
         return { ok: false, code: 'DEVICE_LIMIT_REACHED', maxDevices: lic.max_devices };
       }
+      // R4: ON CONFLICT DO NOTHING RETURNING - atomowe wstawienie bez ryzyka bledu 23505
+      // (poprzedni fallback catch-23505 byl bledny: SELECT po bledzie w aborted transaction).
+      // Brak zwroconego wiersza = konflikt na UNIQUE(license_id, install_id) -> istniejace urzadzenie.
       const newId = randomUuid();
-      try {
-        await client.query(
-          `INSERT INTO devices (id, license_id, install_id, hwid_hash, label) VALUES ($1,$2,$3,$4,$5)`,
-          [newId, lic.id, instId, hwidHash, label]
+      const ins = await client.query(
+        `INSERT INTO devices (id, license_id, install_id, hwid_hash, label)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (license_id, install_id) DO NOTHING
+         RETURNING id, hwid_hash, active`,
+        [newId, lic.id, instId, hwidHash, label]
+      );
+      if (ins.rows.length === 0) {
+        // Konflikt: wiersz juz istnieje (wyścig mimo FOR UPDATE na licencji) - obsluz jak istniejace.
+        const again = await client.query(
+          `SELECT * FROM devices WHERE license_id = $1 AND install_id = $2 FOR UPDATE`,
+          [lic.id, instId]
         );
-      } catch (err) {
-        // Runda 3, Problem 1: UNIQUE(license_id, install_id) to ostatnia linia obrony.
-        // Jesli mimo blokady licencji FOR UPDATE doszlo do naruszenia unikalnosci
-        // (np. w przyszlosci bez blokady), nie zwracamy 500 - traktujemy jak istniejace urzadzenie.
-        if (err.code === '23505') {
-          const again = await client.query(
-            `SELECT * FROM devices WHERE license_id = $1 AND install_id = $2 FOR UPDATE`,
-            [lic.id, instId]
-          );
-          if (again.rows.length) {
-            device = again.rows[0];
-            if (device.hwid_hash && device.hwid_hash !== hwidHash) {
-              await recordAbuse({ kind: 'DEVICE_HWID_MISMATCH', severity: 'high', ipHash, keyHash: kh, installId: instId, meta: { license_id: lic.id, device_id: device.id, race: true } });
-              return { ok: false, code: 'HWID_MISMATCH' };
-            }
-            if (!device.active) {
-              await client.query(
-                `UPDATE devices SET active = TRUE, deactivated_at = NULL, hwid_hash = COALESCE(hwid_hash, $2), last_seen_at = now() WHERE id = $1`,
-                [device.id, hwidHash]
-              );
-              device.active = true;
-            }
-            await client.query(
-              `INSERT INTO activation_history (license_id, device_id, action, ip_hash, user_agent, meta)
-               VALUES ($1,$2,'REACTIVATE',$3,$4,$5)`,
-              [lic.id, device.id, ipHash, userAgent, JSON.stringify({ result: 'race_existing_device' })]
-            );
-          } else {
-            throw err;
-          }
-        } else {
-          throw err;
+        device = again.rows[0];
+        if (device.hwid_hash && device.hwid_hash !== hwidHash) {
+          await recordAbuse({ kind: 'DEVICE_HWID_MISMATCH', severity: 'high', ipHash, keyHash: kh, installId: instId, meta: { license_id: lic.id, device_id: device.id, race: true } });
+          await logAuditTx(client, { actorType: 'client', action: 'license.activate.hwid_mismatch', target: lic.id, ipHash, severity: 'warning', meta: { device_id: device.id, race: true } });
+          return { ok: false, code: 'HWID_MISMATCH' };
         }
-      }
-      if (!device) {
-        device = { id: newId, active: true };
+        if (!device.active) {
+          await client.query(
+            `UPDATE devices SET active = TRUE, deactivated_at = NULL, hwid_hash = COALESCE(hwid_hash, $2), last_seen_at = now() WHERE id = $1`,
+            [device.id, hwidHash]
+          );
+          device.active = true;
+          await client.query(
+            `INSERT INTO activation_history (license_id, device_id, action, ip_hash, user_agent, meta)
+             VALUES ($1,$2,'REACTIVATE',$3,$4,$5)`,
+            [lic.id, device.id, ipHash, userAgent, JSON.stringify({ result: 'race_existing_device' })]
+          );
+        }
+      } else {
+        device = { id: ins.rows[0].id, active: true };
         await client.query(
           `INSERT INTO activation_history (license_id, device_id, action, ip_hash, user_agent, meta)
            VALUES ($1,$2,'ACTIVATE',$3,$4,$5)`,
           [lic.id, device.id, ipHash, userAgent, JSON.stringify({ result: 'ok' })]
         );
-        // Runda 3, Problem 1: ponowna kontrola limitu PO insertcie (defense in depth).
+        // Kontrola limitu PO insertcie (defense in depth).
         const afterCount = await client.query(
           `SELECT COUNT(*)::int AS n FROM devices WHERE license_id = $1 AND active = TRUE`,
           [lic.id]

@@ -1,9 +1,10 @@
-# D01i Tweakz - bezpieczne zatrzymanie backendu (Windows).
+# D01i Tweakz - bezpieczne zatrzymanie backendu (Windows), FAIL-CLOSED (Runda 4).
 # Zatrzymujemy WYLACZNIE proces zweryfikowany przez backend.pid.json:
-#   PID + czas startu procesu (ochrona przed ponownym przydzieleniem PID)
-#   + sciezka node.exe + pelna sciezka src\index.js z katalogu instalacji.
-# NIGDY nie zabijamy procesu na podstawie samego portu 8080 ani samego PID.
-# Uwaga: zmienna nazywa sie $backendPid, bo $pid kolidowalaby z automatycznym $PID.
+#   PID + StartTime + dokladna sciezka node.exe + oczekiwany skrypt src\index.js
+#   + ODCZYTANA linia polecen (CommandLine) z Win32_Process.
+# Kazdy blad/brak/null/pusty CommandLine = NIEUDANA weryfikacja = NIE zatrzymujemy procesu.
+# Nie kasujemy pliku PID przy nieudanej weryfikacji (zostaje do recznej diagnostyki).
+# Uwaga: zmienna to $backendPid - $pid kolidowaloby z automatyczna zmienna $PID.
 #requires -Version 5.1
 param(
     [string]$EnvFile = "$env:ProgramData\D01iTweakz\.env",
@@ -17,8 +18,7 @@ if (-not (Test-Path $PidFile)) {
     exit 0
 }
 try { $meta = Get-Content $PidFile -Raw | ConvertFrom-Json } catch {
-    Write-Host "Plik PID uszkodzony - usuwam go i nie zatrzymuje zadnego procesu." -ForegroundColor Yellow
-    Remove-Item $PidFile -ErrorAction SilentlyContinue
+    Write-Host "Plik PID uszkodzony - nie zatrzymuje zadnego procesu (zostawiam plik do diagnostyki)." -ForegroundColor Yellow
     exit 1
 }
 $backendPid = [int]$meta.Pid
@@ -29,23 +29,35 @@ if (-not $p) {
     exit 0
 }
 
-# Weryfikacja tozsamosci przed zabiciem:
-$verified = $true
-if ($p.StartTime -ne [datetime]$meta.StartTime) { $verified = $false }          # PID przejety przez inny proces
-if ($p.Path -ne $meta.NodeExe) { $verified = $false }
+# --- fail-closed: wszystkie kontrole musza przejsc ---
+$reasons = @()
+if ($p.StartTime -ne [datetime]$meta.StartTime) { $reasons += "StartTime mismatch (PID mogl byc ponownie przydzielony)" }
+if ($p.Path -ne $meta.NodeExe) { $reasons += "sciezka exe inna niz zapisana ($($p.Path))" }
 $expectedScript = Join-Path $InstallDir 'src\index.js'
-if ($meta.Script -ne $expectedScript) { $verified = $false }
+if ($meta.Script -ne $expectedScript) { $reasons += "zapisana sciezka skryptu niezgodna z instalacja" }
+
+# CommandLine jest OBOWIĄZKOWY: wyjatek / brak obiektu / null / pusty = nieudana weryfikacja.
+$cmdLine = $null
+$cimOk = $true
 try {
-    $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $backendPid").CommandLine
-    if ($cmdLine -and $cmdLine -notmatch [regex]::Escape($expectedScript)) { $verified = $false }
+    $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $backendPid" -ErrorAction Stop
+    if (-not $cim) { $cimOk = $false; $reasons += "brak obiektu CIM dla PID $backendPid" }
+    else { $cmdLine = $cim.CommandLine }
 } catch {
-    # Nie mozemy odczytac linii polecen - nie ryzykujemy: weryfikujemy tylko na podstawie metadanych.
-    Write-Host "Nie udalo sie odczytac linii polecen procesu - weryfikacja tylko po PID+StartTime+sciezce." -ForegroundColor Yellow
+    $cimOk = $false
+    $reasons += "wyjatek przy odczycie CommandLine: $($_.Exception.Message)"
+}
+if ($cimOk -and ([string]::IsNullOrWhiteSpace($cmdLine))) { $reasons += "pusty/null CommandLine" }
+if ($cmdLine) {
+    # normalizacja cudzyslowow i wielkosci liter przy porownaniu sciezki skryptu
+    $norm = $cmdLine -replace '"', ''
+    if ($norm -notmatch [regex]::Escape($expectedScript)) { $reasons += "CommandLine nie zawiera oczekiwanego skryptu ($expectedScript)" }
 }
 
-if (-not $verified) {
-    Write-Host "UWAGA: proces PID $backendPid ($($p.Path)) NIE przechodzi weryfikacji tozsamosci - NIE zatrzymuje go." -ForegroundColor Yellow
-    Write-Host "Jesli to falszywy alarm, usun recznie: $PidFile"
+if ($reasons.Count -gt 0) {
+    Write-Host "Weryfikacja tozsamosci NIEUDANA - NIE zatrzymuje procesu PID $backendPid:" -ForegroundColor Yellow
+    $reasons | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+    Write-Host "Plik PID zostaje ($PidFile) do recznej diagnostyki."
     exit 1
 }
 Stop-Process -Id $backendPid -Force

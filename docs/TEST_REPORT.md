@@ -1,63 +1,32 @@
-# Raport testów — D01i Tweakz Backend (wydanie 1.0.0)
+# Raport testów — D01i Tweakz Backend
 
-**Data uruchomienia:** 2026-11-04 (po dwóch rundach audytu) · **Środowisko:** Node.js v22.22.3, PostgreSQL (instancja testowa), Debian sandbox
-**Polecenie:** `node --test --test-concurrency=1 "test/*.test.js"` (w `backend/`)
-
-## Wynik: 49 / 49 PASS, 0 FAIL (po trzech rundach audytu)
-
+**Ostatnie uruchomienie:** 2026-11-04, runda 4 audytu
+**Środowisko:** Node.js v22.22.3 · PostgreSQL 16.2 (embedded, pgserver) · Debian 12 sandbox · 2 CPU
+**Dokładna komenda:**
+```bash
+cd backend
+ARGON2_MEMORY_COST=19456 ARGON2_TIME_COST=2 node --test --test-concurrency=1 "test/*.test.js"
 ```
-# tests 46
-# pass 46
+(ARGON2_* tylko skraca testy; produkcja używa 64 MB/3 — Argon2id.)
+
+## Wynik: 53 / 53 PASS, 0 FAIL
+
+Surowy wynik (stdout):
+```
+# tests 53
+# pass 53
 # fail 0
 ```
 
-Nowe testy regresyjne z audytu: stary token po rotacji → 401; 6 równoczesnych refreshów → dokładnie 1 nowy token; replay po oknie idempotencji → 401 TOKEN_ROTATED (osobny proces); HWID mismatch → 409 + zdarzenie; reset admina czyści HWID i pozwala na ponowne związanie; API odrzuca max_devices>2; sekrety TOTP/webhook zaszyfrowane w bazie; recovery code jednorazowy; wyłączenie MFA wymaga hasła+TOTP; zwykły admin → 403 na /admin/admins; TOKEN_TTL_SECONDS poza 30–120 → odmowa startu.
+## Zakres
+- **license.test.js:** aktywacja, zły/wygasły/revokowany klucz, limit 2 urządzeń (409 na 3.), równoczesne aktywacje (FOR UPDATE + ON CONFLICT), R3-P1 (6×równoczesny ten sam install_id: dokładnie 1×200 + 5×409 HWID_MISMATCH, brak 500/429, 1 wiersz), HWID mismatch + reset admina, tokeny (walidacja, rotacja z unieważnieniem, replay w oknie, R3-P2: replay nie mintuje sesji, stary token → 401 wszędzie), R3-P3 sesje admina (revoked/expired/wyłączone → 401), błędne wejście, health.
+- **admin.test.js:** login, 401 bez sesji, 403 bez CSRF, CRUD licencji (klucz raz, tylko hash w bazie), revoke unieważnia sesje, extend/historia, audit, brute-force 423, MFA TOTP, **recovery code atomowy (8 równoczesnych → 1 sukces)**, wyłączenie MFA wymaga hasła+TOTP, max_devices>2 → 400, zwykły admin → 403 na /admin/admins, webhook maskowany.
+- **security.test.js:** wygasły/nieznany/fałszowany token, burst błędnych kluczy → blokada IP 429, rate limit (proces-dziecko), CSP/XFO, SQLi, 404, TTL poza zakresem → odmowa startu, replay po oknie → TOKEN_ROTATED.
+- **migrations.test.js:** idempotentność, błąd migracji = rollback bez wpisu i bez częściowych zmian, **R4: 4 niezależne procesy na czystej bazie → wszystkie OK, każda migracja raz, schemat kompletny**.
+- **secrets.test.js:** migracja legacy sekretów (idempotentna, TOTP/webhook działają po migracji), uszkodzony ciphertext, zły klucz odrzucony, **R4: verifySecretKeyIntegrity (dobry/zły klucz, dane niezmienione po błędzie)**, walidacja SECRET_ENC_KEY 64-HEX, statyczna kontrola instalatora Windows (32 bajty).
 
-## Lista testów (wszystkie wykonane realnie, wszystkie zielone)
-
-| # | Test | Plik |
-|---|---|---|
-| 1 | logowanie admina: złe hasło → 401, dobre → cookie + CSRF | admin |
-| 2 | dostęp do API admin bez sesji → 401 | admin |
-| 3 | POST bez tokena CSRF → 403 | admin |
-| 4 | CRUD licencji: klucz pokazany tylko raz, tylko hash w bazie, revoke unieważnia sesje klienta, reset urządzeń | admin |
-| 5 | przedłużanie licencji + historia aktywacji | admin |
-| 6 | audit log rejestruje akcje admina | admin |
-| 7 | brute-force logowania → blokada konta (423) | admin |
-| 8 | MFA: TOTP setup/enable, logowanie wymaga kodu | admin |
-| 9 | logout unieważnia sesję | admin |
-| 10 | webhook: zapis ustawień + maskowanie URL w odpowiedziach | admin |
-| 11 | poprawna aktywacja → token + dane licencji | license |
-| 12 | niepoprawny klucz → 401 KEY_INVALID | license |
-| 13 | validate + refresh z rotacją; idempotentny replay po utracie odpowiedzi | license |
-| 14 | limit 2 urządzeń: 3. aktywacja → 409 | license |
-| 15 | dezaktywacja zwalnia slot → ponowna aktywacja OK | license |
-| 16 | 8 równoczesnych aktywacji 3. urządzenia → 0 sukcesów (FOR UPDATE) | license |
-| 17 | wygasła licencja → LICENSE_EXPIRED | license |
-| 18 | revoke → LICENSE_REVOKED + sesje unieważnione natychmiast | license |
-| 19 | sfałszowany podpis → 401 + zdarzenie TOKEN_TAMPER | license |
-| 20 | status + lista urządzeń | license |
-| 21 | błędne dane wejściowe → 400 VALIDATION_ERROR | license |
-| 22 | health endpoint (DB ok) | license |
-| 23 | wygasły token (TTL) → TOKEN_EXPIRED | security |
-| 24 | poprawny podpis, nieznana sesja → SESSION_UNKNOWN + alert | security |
-| 25 | burst 6 błędnych kluczy → FAILED_KEY_BURST + czasowa blokada IP (429) | security |
-| 26 | rate limiting aktywacji (limit 3/okno → 429) | security |
-| 27 | nagłówki CSP/XFO/nosniff ustawione | security |
-| 28 | SQL injection w wyszukiwarce — tabela licencji nietknięta | security |
-| 29 | nieznana trasa API → 404 JSON | security |
-
-## Dodatkowy smoke test (ręczny, serwer produkcyjny w trybie `NODE_ENV=production`)
-- migracje startowe OK, bootstrap admina OK
-- `POST /admin/login` → cookie + CSRF
-- `POST /admin/licenses` → klucz `D01I-....` pokazany raz
-- `POST /license/activate` → token Ed25519; `validate` → valid; `refresh` → nowy token
-- `GET /admin/ops/stats` → poprawne statystyki
-- panel `/admin/` serwuje HTML/CSS/JS z poprawnymi typami MIME
-
-## Znane ograniczenia testów
-- Testy używają osobnych baz `d01i_test_*`; produkcyjna baza nie jest dotykana.
-- Argon2 w testach ma obniżony koszt pamięci (zmienne `ARGON2_MEMORY_COST/ARGON2_TIME_COST`);
-  produkcja używa domyślnych 64 MB / 3 iteracje (Argon2id).
-
-### Runda 2 (FOLLOWUP_AUDIT): migracje (idempotentność, błąd=brak częściowych zmian, advisory lock przy równoczesności), migracja legacy sekretów, atomowe zużycie recovery code (8 równoczesnych prób → 1 sukces), walidacja SECRET_ENC_KEY.
+## Testy NIE wykonane (nie deklarowane jako wykonane)
+- Czysta instalacja na Ubuntu Server / Windows 11 Home/Pro (brak VM w sandboxie) — warunek przedprodukcyjny.
+- Parser PowerShell (`pwsh` niedostępny w sandboxie) — skrypty PS sprawdzone statycznie.
+- Testy przeglądarki panelu WWW (brak przeglądarki) — logika panelu przez API.
+- Produkcyjna baza nie jest dotykana przez testy (osobne bazy `d01i_test_*`).

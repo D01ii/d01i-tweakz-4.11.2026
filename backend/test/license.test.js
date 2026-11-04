@@ -218,11 +218,11 @@ test('R3-P1: rownolegla aktywacja tego samego install_id z roznymi HWID - bez du
     )
   );
   const statuses = results.map((r) => r.status).sort();
-  assert.ok(!statuses.includes(500), `brak 500, statusy: ${statuses}`);
+  assert.ok(!statuses.includes(500) && !statuses.includes(429), `brak 500/429 (blokada/limit nie moga maskowac wyniku), statusy: ${statuses}`);
   const okCount = results.filter((r) => r.status === 200).length;
-  assert.ok(okCount <= 1, `maks. jedna aktywacja OK, otrzymano ${okCount}`);
   const mismatch = results.filter((r) => r.status === 409 && r.body.error === 'HWID_MISMATCH').length;
-  assert.ok(mismatch >= 1, 'pozostale dostaly 409 HWID_MISMATCH');
+  assert.equal(okCount, 1, `dokladnie jedna aktywacja OK, otrzymano ${okCount} (statusy: ${statuses})`);
+  assert.equal(mismatch, 5, `pozostale 5 dostaly 409 HWID_MISMATCH, otrzymano ${mismatch}`);
   const devCount = await t.query(`SELECT COUNT(*)::int AS n FROM devices WHERE license_id=$1 AND install_id=$2`, [lic.id, INSTALL_A]);
   assert.equal(devCount.rows[0].n, 1, 'dokladnie jedno urzadzenie dla install_id (UNIQUE)');
   // sprzatanie: test celowo generuje zdarzenia HWID_MISMATCH (auto-blokada IP) - cofamy blokade

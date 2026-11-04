@@ -21,31 +21,33 @@ export async function migrate({ log = console.log } = {}) {
     .filter((f) => f.endsWith('.sql'))
     .sort();
 
-  const done = new Set((await query('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
-
-  for (const file of files) {
-    if (done.has(file)) {
-      log(`[migrate] pomijam (juz wykonana): ${file}`);
-      continue;
-    }
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
-    log(`[migrate] wykonuje: ${file}`);
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      // Blokada doradcza na czas calej transakcji: dwa rownolegle migmatory
-      // nie wykonaja tej samej migracji jednoczesnie.
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['d01i_tweakz_migrations']);
+  // R4: caly przebieg w JEDNEJ transakcji z advisory lock NA POCZATKU.
+  // Zestaw wykonanych migracji odczytujemy DOPIERO po uzyskaniu blokady -
+  // wczesniejszy odczyt `done` przed lockiem moglby uzyc nieaktualnych danych.
+  const client = await pool.connect();
+  let current = null;
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['d01i_tweakz_migrations']);
+    const done = new Set((await client.query('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
+    for (const file of files) {
+      if (done.has(file)) {
+        log(`[migrate] pomijam (juz wykonana): ${file}`);
+        continue;
+      }
+      current = file;
+      const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+      log(`[migrate] wykonuje: ${file}`);
       await client.query(sql);
       await client.query('INSERT INTO schema_migrations(name) VALUES ($1)', [file]);
-      await client.query('COMMIT');
       log(`[migrate] OK: ${file}`);
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw new Error(`Migracja ${file} nieudana: ${err.message}`);
-    } finally {
-      client.release();
     }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw new Error(`Migracja ${current || '?'} nieudana: ${err.message}`);
+  } finally {
+    client.release();
   }
   return files.length;
 }
