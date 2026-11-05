@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { config } from '../../config/index.js';
-import { loginAdmin, logoutAdmin, setupTotp, enableTotp, disableTotp, listAdmins, createAdmin, setAdminActive } from '../../services/adminService.js';
+import { loginAdmin, logoutAdmin, setupTotp, enableTotp, disableTotp, changeAdminPassword, listAdmins, createAdmin, setAdminActive } from '../../services/adminService.js';
 import { requireAdmin, requireRole } from '../../middleware/adminAuth.js';
-import { loginLimiter, adminApiLimiter } from '../../middleware/rateLimit.js';
+import { loginLimiter, adminApiLimiter, mfaLimiter } from '../../middleware/rateLimit.js';
 import { httpError } from '../../middleware/common.js';
 import { logAudit } from '../../services/auditService.js';
 
@@ -72,23 +72,32 @@ router.get('/csrf', requireAdmin, async (req, res, next) => {
 });
 
 // ------------------------------ MFA ------------------------------
-router.post('/mfa/setup', requireAdmin, adminApiLimiter, async (req, res, next) => {
+// R7: kazda zmiana MFA wymaga ponownego uwierzytelnienia (haslo + TOTP/kod odzyskiwania gdy MFA juz aktywne).
+router.post('/mfa/setup', requireAdmin, mfaLimiter, async (req, res, next) => {
   try {
-    const r = await setupTotp(req.admin.adminId);
+    const r = await setupTotp(req.admin.adminId, {
+      password: String(req.body?.password || ''),
+      totp: req.body?.totp ? String(req.body.totp) : null,
+      recoveryCode: req.body?.recovery_code ? String(req.body.recovery_code) : null,
+      exceptSessionId: req.admin.sessionId,
+    });
     res.json({ ok: true, secret: r.secret, otpauth: r.otpauth });
-  } catch (e) { next(e); }
+  } catch (e) { next(e.status ? e : httpError(400, 'MFA_ERROR', e.message)); }
 });
 
-router.post('/mfa/enable', requireAdmin, adminApiLimiter, async (req, res, next) => {
+router.post('/mfa/enable', requireAdmin, mfaLimiter, async (req, res, next) => {
   try {
     const code = String(req.body?.code || '');
     if (!/^\d{6}$/.test(code)) throw httpError(400, 'VALIDATION_ERROR', 'Kod TOTP musi miec 6 cyfr.');
-    const r = await enableTotp(req.admin.adminId, code);
+    const r = await enableTotp(req.admin.adminId, code, {
+      password: String(req.body?.password || ''),
+      exceptSessionId: req.admin.sessionId,
+    });
     res.json({ ok: true, recovery_codes: r.recoveryCodes });
   } catch (e) { next(e.status ? e : httpError(400, 'MFA_ERROR', e.message)); }
 });
 
-router.post('/mfa/disable', requireAdmin, adminApiLimiter, async (req, res, next) => {
+router.post('/mfa/disable', requireAdmin, mfaLimiter, async (req, res, next) => {
   try {
     await disableTotp(req.admin.adminId, {
       password: String(req.body?.password || ''),
@@ -97,6 +106,21 @@ router.post('/mfa/disable', requireAdmin, adminApiLimiter, async (req, res, next
     });
     res.json({ ok: true });
   } catch (e) { next(e.status ? e : httpError(400, 'MFA_ERROR', e.message)); }
+});
+
+// R7: zmiana hasla — wymaga hasła + TOTP (gdy MFA aktywne); uniewaznia pozostałe sesje.
+router.post('/password/change', requireAdmin, mfaLimiter, async (req, res, next) => {
+  try {
+    const newPassword = String(req.body?.password || '');
+    if (newPassword.length < 12) throw httpError(400, 'VALIDATION_ERROR', 'Nowe haslo musi miec min. 12 znakow.');
+    await changeAdminPassword(req.admin.adminId, {
+      currentPassword: String(req.body?.current_password || ''),
+      newPassword,
+      totp: req.body?.totp ? String(req.body.totp) : null,
+      exceptSessionId: req.admin.sessionId,
+    });
+    res.json({ ok: true });
+  } catch (e) { next(e.status ? e : httpError(400, 'PASSWORD_ERROR', e.message)); }
 });
 
 // ------------------------------ zarzadzanie adminami (superadmin) ------------------------------

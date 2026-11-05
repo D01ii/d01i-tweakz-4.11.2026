@@ -1,6 +1,6 @@
 import { query, withTransaction } from '../db/pool.js';
 import { config } from '../config/index.js';
-import { keyHash, licenseDurationDays } from '../utils/licenseKey.js';
+import { keyHash, keyHashLegacy, licenseDurationDays } from '../utils/licenseKey.js';
 import { pepperedHash, randomUuid } from '../utils/crypto.js';
 import { issueSession, verifySessionToken, refreshSession, revokeAllSessions } from './tokenService.js';
 import { logAudit, logAuditTx } from './auditService.js';
@@ -31,7 +31,11 @@ export async function activate({ key, installId, hwid, label = null, ipHash = nu
   const instId = installId.trim();
 
   return withTransaction(async (client) => {
-    const licR = await client.query(`SELECT * FROM licenses WHERE key_hash = $1 FOR UPDATE`, [kh]);
+    // R7: lookup po v2 (HMAC+pepper) ORAZ legacy v1 (sha256) — kompatybilność z istniejącymi licencjami.
+    const licR = await client.query(
+      `SELECT * FROM licenses WHERE key_hash = $1 OR key_hash = $2 FOR UPDATE`,
+      [kh, keyHashLegacy(key)]
+    );
     if (licR.rows.length === 0) {
       await recordAbuse({ kind: 'FAILED_KEY', severity: 'low', ipHash, keyHash: kh, installId: instId, meta: { stage: 'unknown_key' } });
       await maybeEscalateFailedKeys(ipHash);
@@ -220,7 +224,7 @@ export async function deactivate({ token = null, key = null, installId = null, i
     licenseId = v.payload.lic;
     deviceId = v.payload.dev;
   } else if (key && installId) {
-    const lic = await query(`SELECT id FROM licenses WHERE key_hash = $1`, [keyHash(key)]);
+    const lic = await query(`SELECT id FROM licenses WHERE key_hash = $1 OR key_hash = $2`, [keyHash(key), keyHashLegacy(key)]);
     if (!lic.rows.length) return { ok: false, reason: 'KEY_INVALID' };
     licenseId = lic.rows[0].id;
     const dev = await query(`SELECT id FROM devices WHERE license_id = $1 AND install_id = $2`, [licenseId, installId.trim()]);

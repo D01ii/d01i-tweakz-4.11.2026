@@ -20,3 +20,5 @@ export const activateLimiter = makeLimiter(config.rateLimit.activateMax, 'Zbyt w
 export const validateLimiter = makeLimiter(config.rateLimit.validateMax, 'Zbyt wiele prob walidacji.');
 export const loginLimiter = makeLimiter(config.rateLimit.loginMax, 'Zbyt wiele nieudanych prob logowania. Konto/IP moze zostac czasowo zablokowane.');
 export const adminApiLimiter = makeLimiter(config.rateLimit.adminApiMax, 'Zbyt wiele zadan do API administracyjnego.');
+// R7: osobny, ostrzejszy limit dla prob MFA (TOTP/kody odzyskiwania)
+export const mfaLimiter = makeLimiter(Math.max(3, Math.floor(config.rateLimit.loginMax / 2)), 'Zbyt wiele prob MFA. Sprobuj pozniej.');

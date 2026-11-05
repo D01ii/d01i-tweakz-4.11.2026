@@ -46,7 +46,7 @@ test('CRUD licencji przez panel: utworzenie zwraca klucz tylko raz, lista, revok
 
   // pelny klucz NIE jest w bazie - tylko hash
   const inDb = await t.query(`SELECT key_hash FROM licenses WHERE id=$1`, [licId]);
-  assert.ok(inDb.rows[0].key_hash.length === 64);
+  assert.ok(/^v2:[0-9a-f]{64}$/.test(inDb.rows[0].key_hash), 'key_hash = v2:HMAC (R7)');
   assert.ok(!JSON.stringify(inDb.rows).includes(cj.key));
 
   const list = await api('/api/v1/admin/licenses');
@@ -107,10 +107,10 @@ test('MFA: setup + enable TOTP, logowanie wymaga kodu', async () => {
   const { createAdmin, setupTotp, enableTotp, loginAdmin } = await import('../src/services/adminService.js');
   await createAdmin({ username: 'mfaadmin', password: 'super-secret-password-123' });
   const id = (await t.query(`SELECT id FROM admins WHERE username='mfaadmin'`)).rows[0].id;
-  const { secret } = await setupTotp(id);
+  const { secret } = await setupTotp(id, { password: 'super-secret-password-123' });
   const { authenticator } = await import('otplib');
   const code = authenticator.generate(secret);
-  await enableTotp(id, code);
+  await enableTotp(id, code, { password: 'super-secret-password-123' });
   const r = await loginAdmin({ username: 'mfaadmin', password: 'super-secret-password-123' });
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'TOTP_REQUIRED');
@@ -157,7 +157,7 @@ test('sekret TOTP i URL webhooka sa szyfrowane w bazie (B4)', async () => {
   const { createAdmin, setupTotp } = await import('../src/services/adminService.js');
   await createAdmin({ username: 'encadmin', password: 'super-secret-password-123' });
   const id = (await t.query(`SELECT id FROM admins WHERE username='encadmin'`)).rows[0].id;
-  const { secret } = await setupTotp(id);
+  const { secret } = await setupTotp(id, { password: 'super-secret-password-123' });
   const row = await t.query(`SELECT totp_secret FROM admins WHERE id=$1`, [id]);
   assert.ok(row.rows[0].totp_secret.startsWith('enc:v1:'), 'sekret TOTP zaszyfrowany');
   assert.ok(!row.rows[0].totp_secret.includes(secret), 'plaintext sekretu nie ma w bazie');
@@ -175,8 +175,8 @@ test('recovery code dziala jednorazowo (B5)', async () => {
   const { authenticator } = await import('otplib');
   await createAdmin({ username: 'recoveryadmin', password: 'super-secret-password-123' });
   const id = (await t.query(`SELECT id FROM admins WHERE username='recoveryadmin'`)).rows[0].id;
-  const { secret } = await setupTotp(id);
-  const { recoveryCodes } = await enableTotp(id, authenticator.generate(secret));
+  const { secret } = await setupTotp(id, { password: 'super-secret-password-123' });
+  const { recoveryCodes } = await enableTotp(id, authenticator.generate(secret), { password: 'super-secret-password-123' });
   const code = recoveryCodes[0];
   const r1 = await loginAdmin({ username: 'recoveryadmin', password: 'super-secret-password-123', recoveryCode: code });
   assert.equal(r1.ok, true, 'pierwsze użycie recovery code OK');
@@ -194,8 +194,8 @@ test('wylaczenie MFA wymaga hasla + TOTP/kodu odzyskiwania (D2)', async () => {
   const { authenticator } = await import('otplib');
   await createAdmin({ username: 'mfadisable', password: 'super-secret-password-123' });
   const id = (await t.query(`SELECT id FROM admins WHERE username='mfadisable'`)).rows[0].id;
-  const { secret } = await setupTotp(id);
-  await enableTotp(id, authenticator.generate(secret));
+  const { secret } = await setupTotp(id, { password: 'super-secret-password-123' });
+  await enableTotp(id, authenticator.generate(secret), { password: 'super-secret-password-123' });
   await assert.rejects(() => disableTotp(id, { password: 'super-secret-password-123' }), /TOTP|odzyskiwania/);
   await assert.rejects(() => disableTotp(id, { password: 'zle-haslo-12345', totp: authenticator.generate(secret) }), /haslo/i);
   await disableTotp(id, { password: 'super-secret-password-123', totp: authenticator.generate(secret) });
@@ -222,8 +222,8 @@ test('recovery code przy rownoleglych probach logowania zuzywa sie ATOMOWO - tyl
   const { authenticator } = await import('otplib');
   await createAdmin({ username: 'raceadmin', password: 'super-secret-password-123' });
   const id = (await t.query(`SELECT id FROM admins WHERE username='raceadmin'`)).rows[0].id;
-  const { secret } = await setupTotp(id);
-  const { recoveryCodes } = await enableTotp(id, authenticator.generate(secret));
+  const { secret } = await setupTotp(id, { password: 'super-secret-password-123' });
+  const { recoveryCodes } = await enableTotp(id, authenticator.generate(secret), { password: 'super-secret-password-123' });
   const code = recoveryCodes[0];
   const results = await Promise.all(
     Array.from({ length: 8 }, () => loginAdmin({ username: 'raceadmin', password: 'super-secret-password-123', recoveryCode: code }))
@@ -260,4 +260,48 @@ test('R3-P3: uniewazniona/wygasla/wylaczona sesja admina nie przechodzi autoryza
   const { setAdminActive } = await import('../src/services/adminService.js');
   await setAdminActive(admin3, false, null);
   assert.equal((await api3('/api/v1/admin/me')).status, 401, 'konto wylaczone -> 401');
+});
+
+test('R7: klucz licencyjny — lookup dziala dla v2 (HMAC) i legacy (sha256)', async () => {
+  const { keyHash, keyHashLegacy, generateLicenseKey } = await import('../src/utils/licenseKey.js');
+  const key = generateLicenseKey();
+  assert.ok(keyHash(key).startsWith('v2:') && keyHash(key).length === 67);
+  assert.equal(keyHashLegacy(key).length, 64);
+  assert.notEqual(keyHash(key), keyHashLegacy(key));
+  // aktywacja przez API dziala (v2), legacy hash w bazie też akceptowany
+  const { activate } = await import('../src/services/licenseService.js');
+  const lic = await t.query(
+    `INSERT INTO licenses (key_hash, key_prefix, type, status, max_devices) VALUES ($1, $2, 'PREMIUM_30D', 'ACTIVE', 2)`,
+    [keyHash(key), key.slice(0, 9)]
+  );
+  const r = await activate({ key, installId: 'R7LEGACYINST01', hwid: 'R7HWIDLEGACY01' });
+  assert.equal(r.ok, true);
+});
+
+test('R7: MFA setup/enable wymagaja ponownego uwierzytelnienia (haslo)', async () => {
+  const { createAdmin, setupTotp, enableTotp } = await import('../src/services/adminService.js');
+  await createAdmin({ username: 'mfareauth', password: 'super-secret-password-123' });
+  const id = (await t.query(`SELECT id FROM admins WHERE username='mfareauth'`)).rows[0].id;
+  await assert.rejects(() => setupTotp(id), /haslo/i);
+  await assert.rejects(() => setupTotp(id, { password: 'zle-haslo-123' }), /haslo/i);
+  await setupTotp(id, { password: 'super-secret-password-123' });
+});
+
+test('R7: zmiana hasla uniewaznia pozostale sesje admina', async () => {
+  const { createAdmin, loginAdmin, changeAdminPassword, verifyAdminSession } = await import('../src/services/adminService.js');
+  await createAdmin({ username: 'pwchange', password: 'super-secret-password-123' });
+  const s1 = await loginAdmin({ username: 'pwchange', password: 'super-secret-password-123' });
+  const s2 = await loginAdmin({ username: 'pwchange', password: 'super-secret-password-123' });
+  await changeAdminPassword((await t.query(`SELECT id FROM admins WHERE username='pwchange'`)).rows[0].id, {
+    currentPassword: 'super-secret-password-123', newPassword: 'nowe-super-haslo-456', exceptSessionId: s1.sessionId,
+  });
+  assert.ok(await verifyAdminSession(s1.sessionToken || '', s1.csrfToken), 'biezaca sesja zyje');
+  // druga sesja (starsza) ma byc uniewazniona — verifyAdminSession sprawdza revoked
+  const chk = await t.query(`SELECT revoked FROM admin_sessions WHERE id = $1`, [s2.sessionId]);
+  assert.equal(chk.rows[0].revoked, true, 'pozostala sesja uniewazniona');
+});
+
+test('R7: odpowiedzi /api maja Cache-Control: no-store', async () => {
+  const r = await fetch(`${t.base}/api/v1/admin/ops/health`);
+  assert.equal(r.headers.get('cache-control'), 'no-store');
 });

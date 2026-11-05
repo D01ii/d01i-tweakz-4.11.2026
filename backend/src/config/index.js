@@ -71,6 +71,8 @@ export const config = {
     maxDevicesDefault: int(process.env.MAX_DEVICES_DEFAULT, 2),
   },
   admin: {
+    // R7: wymuszaj MFA dla wszystkich kont adminów (zalecane w produkcji: ADMIN_REQUIRE_MFA=true)
+    mfaRequired: bool(process.env.ADMIN_REQUIRE_MFA, false),
     bootstrapEnabled: bool(process.env.ADMIN_BOOTSTRAP_ENABLED, false),
     bootstrapUsername: process.env.ADMIN_BOOTSTRAP_USERNAME || 'admin',
     bootstrapPassword: process.env.ADMIN_BOOTSTRAP_PASSWORD || '',
@@ -93,7 +95,14 @@ export const config = {
     enabled: bool(process.env.DISCORD_WEBHOOK_ENABLED, false),
     url: process.env.DISCORD_WEBHOOK_URL || '',
   },
+  db: { migrationsUrl: process.env.MIGRATIONS_DATABASE_URL || null }, // R7: opcjonalny osobny użytkownik migracyjny
   secrets: {
+    // R7: osobny pepper do HMAC hashy kluczy licencyjnych (NIE ten sam co SECURITY_PEPPER).
+    // Fallback do SECURITY_PEPPER tylko dla kompatybilnosci; w produkcji ustaw LICENSE_KEY_PEPPER.
+    licenseKeyPepper: process.env.LICENSE_KEY_PEPPER || process.env.SECURITY_PEPPER || (() => {
+      if (bool(process.env.ALLOW_EPHEMERAL_KEYS, false)) return 'dev-only-pepper-not-for-production';
+      throw new Error('Brak LICENSE_KEY_PEPPER. Wygeneruj: openssl rand -hex 32');
+    })(),
     // B4: klucz szyfrowania sekretow w bazie (TOTP, webhook). Wymagany w produkcji.
     encKey: (() => {
       const v = process.env.SECRET_ENC_KEY;

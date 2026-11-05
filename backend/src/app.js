@@ -36,6 +36,8 @@ export function createApp() {
     })
   );
   app.use(express.json({ limit: '64kb' }));
+  // R7: odpowiedzi API nigdy nie mogą być keszowane (sekrety MFA, tokeny, dane licencji).
+  app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
   app.use(cookieParser());
   app.use(ipHashMiddleware);
   app.use(blockCheckMiddleware);

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { sha256Hex } from './crypto.js';
+import { config } from '../config/index.js';
 
 // alfabet bez dwuznacznych znakow (0/O, 1/I/L)
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -42,7 +43,14 @@ export function isValidKeyFormat(key) {
   return /^D01I-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(key);
 }
 
+/** v2: HMAC-SHA256 z osobnym LICENSE_KEY_PEPPER (R7). Prefix 'v2:' rozróżnia wersje. */
 export function keyHash(key) {
+  const k = normalizeKey(key);
+  return 'v2:' + crypto.createHmac('sha256', config.secrets.licenseKeyPepper).update(k).digest('hex');
+}
+
+/** Legacy (v1): niepepperowany SHA-256 — tylko do odczytu istniejących licencji. */
+export function keyHashLegacy(key) {
   return sha256Hex(normalizeKey(key));
 }
 

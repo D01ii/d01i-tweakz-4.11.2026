@@ -4,6 +4,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pool } from './pool.js';
+import pg from 'pg';
+import { config } from '../config/index.js';
+
+// R7: opcjonalny osobny użytkownik migracyjny (MIGRATIONS_DATABASE_URL) — runtime aplikacji
+// nie ma wtedy uprawnień DDL. Bez zmiennej używany jest standardowy pool (DATABASE_URL).
+function getPool() {
+  if (config.db.migrationsUrl) return new pg.Pool({ connectionString: config.db.migrationsUrl, max: 1 });
+  return pool;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, '../../migrations');
@@ -17,7 +26,8 @@ export async function migrate({ log = console.log } = {}) {
   // R4: caly przebieg w JEDNEJ transakcji z advisory lock NA POCZATKU.
   // Zestaw wykonanych migracji odczytujemy DOPIERO po uzyskaniu blokady -
   // wczesniejszy odczyt `done` przed lockiem moglby uzyc nieaktualnych danych.
-  const client = await pool.connect();
+  const p = getPool();
+  const client = await p.connect();
   let current = null;
   try {
     await client.query('BEGIN');
@@ -49,6 +59,7 @@ export async function migrate({ log = console.log } = {}) {
     throw new Error(`Migracja ${current || '?'} nieudana: ${err.message}`);
   } finally {
     client.release();
+    if (p !== pool) await p.end();
   }
   return files.length;
 }
@@ -58,7 +69,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   migrate()
     .then((n) => {
       console.log(`[migrate] zakonczono. Sprawdzonych plikow: ${n}`);
-      return pool.end();
+      return getPool() === pool ? pool.end() : Promise.resolve();
     })
     .catch((err) => {
       console.error(err);

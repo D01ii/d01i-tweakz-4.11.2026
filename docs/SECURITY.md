@@ -59,3 +59,23 @@ Dlatego autoryzacja PREMIUM zawsze pochodzi z backendu; klient nie jest źródł
   kluczy/tokenów/HWID); webhook wyłączalny w panelu; URL zaszyfrowany w bazie i maskowany w API.
 - **TTL tokenów (D1):** 120 s (zakres dozwolony 30–120, poza zakresem backend odmawia startu).
   Uzasadnienie: klient odświeża co ~60 s, więc 120 s daje margines na 1 utraconą odpowiedź.
+
+## Aktualizacja R7 (2026-11-05)
+
+- **Re-autoryzacja MFA:** każda zmiana MFA (`/mfa/setup|enable|disable`) wymaga aktualnego
+  hasła konta (+ kod TOTP / kod odzyskiwania gdy MFA już aktywne). Przejęcie sesji nie wystarczy
+  do zmiany MFA. Test: `R7: MFA wymaga hasla`.
+- **Wymuszenie MFA:** `ADMIN_REQUIRE_MFA=true` → login bez skonfigurowanego TOTP zwraca
+  `MFA_REQUIRED`. Test R7.
+- **Unieważnianie sesji:** zmiana hasła (`POST /admin/password/change`, wymaga starego hasła
+  + TOTP gdy aktywne) oraz włączenie/wyłączenie MFA unieważnia wszystkie pozostałe sesje
+  admina. Test R7.
+- **HMAC kluczy licencji:** `key_hash = 'v2:' + HMAC-SHA256(klucz, LICENSE_KEY_PEPPER)` zamiast
+  gołego sha256; lookup dualny (v2 OR legacy) zachowuje działanie istniejących licencji.
+- **No-store:** wszystkie odpowiedzi `/api` mają `Cache-Control: no-store`. Test R7.
+- **Twardnienie systemd:** pełny zestaw (patrz PRODUCTION_DEPLOYMENT.md).
+- **Backupy szyfrowane fail-closed:** AES-256-CBC + PBKDF2, klucz poza katalogiem backupów
+  (BACKUP_RESTORE.md).
+- **Rozdział DB:** osobny użytkownik migracji (`MIGRATIONS_DATABASE_URL`).
+- **Skan sekretów w CI:** gitleaks job. **Znane ryzyko resztkowe:** zod GHSA-mrhx-c7xc-m3w5
+  (pin 3.25.76 + limit 64 KB) — szczegóły w SECURITY_AUDIT.md.

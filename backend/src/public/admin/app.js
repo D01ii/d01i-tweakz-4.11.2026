@@ -357,13 +357,32 @@
     c.innerHTML = `
       <h2>Moje konto</h2>
       <div class="panel"><h3>MFA (TOTP)</h3>
-        <p class="muted">Dwuetapowe uwierzytelnianie aplikacją typu Google Authenticator / Aegis.</p>
+        <p class="muted">Dwuetapowe uwierzytelnianie aplikacją typu Google Authenticator / Aegis.
+        Każda zmiana MFA wymaga ponownego podania hasła konta (re-autoryzacja).</p>
         <div class="row"><button id="mfa-setup">Skonfiguruj MFA</button></div>
         <div id="mfa-out"></div>
+      </div>
+      <div class="panel"><h3>Zmiana hasła</h3>
+        <label>Aktualne hasło</label><input id="cp-old" type="password" autocomplete="current-password">
+        <label>Nowe hasło (min. 12 znaków)</label><input id="cp-new" type="password" autocomplete="new-password">
+        <div class="row" style="margin-top:10px"><button id="cp-btn">Zmień hasło</button></div>
       </div>`;
+    c.querySelector('#cp-btn').onclick = async () => {
+      try {
+        const totp = prompt('Jeśli MFA jest włączone, podaj aktualny kod TOTP (lub zostaw puste):');
+        await api('/api/v1/admin/password/change', { method: 'POST', body: {
+          current_password: c.querySelector('#cp-old').value,
+          password: c.querySelector('#cp-new').value,
+          totp: totp || undefined } });
+        toast('Hasło zmienione — pozostałe sesje zostały wylogowane.');
+        c.querySelector('#cp-old').value = ''; c.querySelector('#cp-new').value = '';
+      } catch (e) { toast(e.message, true); }
+    };
     c.querySelector('#mfa-setup').onclick = async () => {
       try {
-        const r = await api('/api/v1/admin/mfa/setup', { method: 'POST' });
+        const pw = prompt('Podaj hasło konta, aby rozpocząć konfigurację MFA:');
+        if (pw === null) return;
+        const r = await api('/api/v1/admin/mfa/setup', { method: 'POST', body: { password: pw } });
         c.querySelector('#mfa-out').innerHTML = `
           <p>Skanuj lub wpisz sekret w aplikacji uwierzytelniającej:</p>
           <div class="key-display">${esc(r.secret)}</div>
@@ -373,7 +392,9 @@
           <div id="mfa-rec"></div>`;
         c.querySelector('#mfa-en').onclick = async () => {
           try {
-            const rr = await api('/api/v1/admin/mfa/enable', { method: 'POST', body: { code: c.querySelector('#mfa-code').value } });
+            const pw2 = prompt('Podaj hasło konta, aby aktywować MFA:');
+            if (pw2 === null) return;
+            const rr = await api('/api/v1/admin/mfa/enable', { method: 'POST', body: { password: pw2, code: c.querySelector('#mfa-code').value } });
             c.querySelector('#mfa-rec').innerHTML = `<p>Kody odzyskiwania (zapisz — pokazane tylko raz):</p><div class="key-display">${esc(rr.recovery_codes.join(' '))}</div>`;
             toast('MFA włączone.');
           } catch (e) { toast(e.message, true); }

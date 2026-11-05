@@ -95,6 +95,11 @@ export async function loginAdmin({ username, password, totp = null, recoveryCode
     if (locked) return { ok: false, reason: 'ACCOUNT_LOCKED', lockedUntil: locked };
     return { ok: false, reason: 'INVALID_CREDENTIALS' };
   }
+  // R7: wymuszenie MFA dla wszystkich kont (ADMIN_REQUIRE_MFA=true)
+  if (config.admin.mfaRequired && !admin.totp_enabled) {
+    await logAudit({ actorType: 'system', action: 'admin.login.failed', actorId: admin.id, ipHash, severity: 'warning', meta: { reason: 'mfa_not_enabled' } });
+    return { ok: false, reason: 'MFA_REQUIRED' };
+  }
   if (admin.totp_enabled) {
     // B4: sekret TOTP jest szyfrowany w bazie (AES-256-GCM), odszyfrowujemy tylko do weryfikacji.
     const totpSecret = decryptSecret(admin.totp_secret);
@@ -143,6 +148,29 @@ export async function verifyAdminSession(sessionToken, csrfToken) {
   return { sessionId: row.session_id, adminId: row.admin_id, username: row.username, role: row.role };
 }
 
+/** R7: uniewaznia wszystkie sesje admina oprócz wskazanej (po zmianie hasła/MFA). */
+export async function revokeOtherSessions(adminId, exceptSessionId = null) {
+  await query(
+    `UPDATE admin_sessions SET revoked = TRUE, revoked_at = now()
+     WHERE admin_id = $1 AND NOT revoked AND ($2::uuid IS NULL OR id <> $2)`,
+    [adminId, exceptSessionId]
+  );
+}
+
+export async function changeAdminPassword(adminId, { currentPassword, newPassword, totp = null, exceptSessionId = null }) {
+  if (!newPassword || newPassword.length < 12) throw new Error('Nowe haslo musi miec min. 12 znakow');
+  const r = await query(`SELECT password_hash, totp_secret, totp_enabled FROM admins WHERE id = $1`, [adminId]);
+  if (!r.rows.length) throw new Error('Brak konta');
+  if (!(await verifyPassword(r.rows[0].password_hash, currentPassword || ''))) throw new Error('Nieprawidlowe aktualne haslo');
+  if (r.rows[0].totp_enabled) {
+    if (!totp || !authenticator.check(totp, decryptSecret(r.rows[0].totp_secret))) throw new Error('Wymagany aktualny kod TOTP');
+  }
+  const hash = await hashPassword(newPassword);
+  await query(`UPDATE admins SET password_hash = $2 WHERE id = $1`, [adminId, hash]);
+  await revokeOtherSessions(adminId, exceptSessionId);
+  await logAudit({ actorType: 'admin', actorId: adminId, action: 'admin.password.changed', severity: 'critical' });
+}
+
 export async function logoutAdmin(sessionToken) {
   if (!sessionToken) return;
   await query(`UPDATE admin_sessions SET revoked = TRUE, revoked_at = now() WHERE token_hash = $1`, [sha256Hex(sessionToken)]);
@@ -150,23 +178,35 @@ export async function logoutAdmin(sessionToken) {
 
 // ------------------------------ MFA (TOTP) ------------------------------
 
-export async function setupTotp(adminId) {
+export async function setupTotp(adminId, { password, totp = null, recoveryCode = null, exceptSessionId = null } = {}) {
+  // R7: kazda zmiana konfiguracji MFA wymaga ponownego uwierzytelnienia (haslo + TOTP/kod odzyskiwania gdy MFA aktywne).
+  const r0 = await query(`SELECT password_hash, totp_secret, totp_enabled FROM admins WHERE id = $1`, [adminId]);
+  if (!r0.rows.length || !(await verifyPassword(r0.rows[0].password_hash, password || ''))) throw new Error('Nieprawidlowe haslo — ponowne uwierzytelnienie wymagane');
+  if (r0.rows[0].totp_enabled) {
+    let second = false;
+    if (totp && r0.rows[0].totp_secret && authenticator.check(totp, decryptSecret(r0.rows[0].totp_secret))) second = true;
+    if (!second && recoveryCode) second = await consumeRecoveryCode(adminId, sha256Hex(recoveryCode.trim().toUpperCase()));
+    if (!second) throw new Error('Wymagany aktualny kod TOTP lub kod odzyskiwania');
+  }
   const secret = authenticator.generateSecret();
   await query(`UPDATE admins SET totp_secret = $2, totp_enabled = FALSE WHERE id = $1`, [adminId, encryptSecret(secret)]);
   const otpauth = authenticator.keyuri(adminId, 'D01i Tweakz', secret);
   return { secret, otpauth };
 }
 
-export async function enableTotp(adminId, code) {
-  const r = await query(`SELECT totp_secret FROM admins WHERE id = $1`, [adminId]);
+export async function enableTotp(adminId, code, { password, exceptSessionId = null } = {}) {
+  // R7: włączenie MFA wymaga hasła (re-auth); po zmianie uniewazniamy pozostałe sesje.
+  const r = await query(`SELECT password_hash, totp_secret, totp_enabled FROM admins WHERE id = $1`, [adminId]);
   if (!r.rows.length || !r.rows[0].totp_secret) throw new Error('Najpierw wygeneruj sekret TOTP');
+  if (!(await verifyPassword(r.rows[0].password_hash, password || ''))) throw new Error('Nieprawidlowe haslo — ponowne uwierzytelnienie wymagane');
   if (!authenticator.check(code, decryptSecret(r.rows[0].totp_secret))) throw new Error('Nieprawidlowy kod TOTP');
   const recovery = Array.from({ length: 10 }, () => randomToken(8).toUpperCase());
   await query(
     `UPDATE admins SET totp_enabled = TRUE, recovery_codes = $2 WHERE id = $1`,
     [adminId, recovery.map((c) => sha256Hex(c))]
   );
-  await logAudit({ actorType: 'admin', actorId: adminId, action: 'admin.mfa.enabled', severity: 'warning' });
+  await revokeOtherSessions(adminId, exceptSessionId);
+  await logAudit({ actorType: 'admin', actorId: adminId, action: 'admin.mfa.enabled', severity: 'critical' });
   return { recoveryCodes: recovery }; // wyswietlane tylko raz
 }
 
@@ -185,7 +225,8 @@ export async function disableTotp(adminId, { password, totp = null, recoveryCode
     if (!second) throw new Error('Wymagany aktualny kod TOTP lub kod odzyskiwania');
   }
   await query(`UPDATE admins SET totp_enabled = FALSE, totp_secret = NULL, recovery_codes = NULL WHERE id = $1`, [adminId]);
-  await logAudit({ actorType: 'admin', actorId: adminId, action: 'admin.mfa.disabled', severity: 'warning' });
+  await revokeOtherSessions(adminId, null);
+  await logAudit({ actorType: 'admin', actorId: adminId, action: 'admin.mfa.disabled', severity: 'critical' });
 }
 
 export async function listAdmins() {
