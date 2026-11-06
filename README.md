@@ -15,7 +15,7 @@ cp .env.example .env   # uzupełnij sekrety i klucze
 npm ci
 npm run migrate
 npm start              # http://127.0.0.1:8080  (panel: /admin)
-npm test               # 29 testów integracyjnych (wymaga PostgreSQL)
+npm test               # 62 testy integracyjne (wymaga PostgreSQL)
 ```
 
 Szczegóły: `docs/INSTALL_UBUNTU.md`, `docs/INSTALL_WINDOWS.md`, `docs/API.md`.

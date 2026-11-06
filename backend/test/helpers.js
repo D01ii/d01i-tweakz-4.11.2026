@@ -7,7 +7,10 @@ import { generateKeyPairSync } from 'node:crypto';
 
 // Baza per plik testowy (node --test uruchamia pliki rownolegle), ustawiana przez TEST_DB_NAME.
 export function testDbUrl() {
+  // R8: jeden spójny sposób — preferuj dedykowany TEST_DATABASE_URL, potem DATABASE_URL
+  // (CI ustawia oba; lokalnie bez env używamy wydzielonego socketu /tmp/d01i-pgdata).
   if (process.env.TEST_DATABASE_URL) return process.env.TEST_DATABASE_URL;
+  if (process.env.DATABASE_URL && !process.env.TEST_DB_NAME) return process.env.DATABASE_URL;
   const name = process.env.TEST_DB_NAME ? `d01i_test_${process.env.TEST_DB_NAME}` : 'd01i_test';
   return `postgresql://postgres@/${name}?host=/tmp/d01i-pgdata`;
 }

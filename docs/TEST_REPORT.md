@@ -1,5 +1,10 @@
 # Raport testów — D01i Tweakz Backend
 
+**Aktualizacja R8 (2026-11-06):** 62 testy, 62 PASS, 0 FAIL — 1 przebieg po zmianach R8
+(komenda jak niżej). W tym 3 nowe testy konfiguracji R8 (config.db bez nadpisania,
+fail-closed MFA i LICENSE_KEY_PEPPER w produkcji). PS 5.1/7: parser w CI (nie w sandboxie).
+
+
 **Ostatnie uruchomienie:** 2026-11-04, runda 5 — 5 kolejnych przebiegów, wszystkie 53/53 PASS
 **Środowisko:** Node.js v22.22.3 · PostgreSQL 16.2 (embedded, pgserver) · Debian 12 sandbox · 2 CPU
 **Dokładna komenda:**

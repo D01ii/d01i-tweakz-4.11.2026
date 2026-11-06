@@ -31,7 +31,8 @@ try {
 try { $Host.UI.RawUI.WindowTitle = $script:ProductName } catch {}
 
 # ====================== LOGO (design z darmowej) ======================
-$script:Logo = @' _____   ___  _  _______
+$script:Logo = @'
+ _____   ___  _  _______
 |  __ \ / _ \| |(_____  |
 | |  | | | | | | |   / /
 | |  | | | | | | |  / / 
@@ -129,7 +130,7 @@ $script:State = [ordered]@{
     Version='2.5'; LastBackupDir=''; RegUndo=@(); ServiceUndo=@(); DisabledTasks=@()
     CreatedUltimate=$false; UltimateSchemeGuid=''; PreviousPowerScheme=''
     HibernationWasEnabled=$null; Applied=@(); MsiTouched=@(); CreatedRegistryKeys=@()
-    BcdUndo=@(); PowerUndo=@()
+    BcdUndo=@(); PowerUndo=@(); DnsUndo=@(); NetUndo=@(); FileUndo=@()
 }
 function Read-State {
     if (Test-Path -LiteralPath $script:StateFile) {
@@ -140,7 +141,7 @@ function Read-State {
             }
         } catch {}
     }
-    foreach ($p in @('RegUndo','ServiceUndo','DisabledTasks','Applied','MsiTouched','CreatedRegistryKeys','BcdUndo','PowerUndo')) {
+    foreach ($p in @('RegUndo','ServiceUndo','DisabledTasks','Applied','MsiTouched','CreatedRegistryKeys','BcdUndo','PowerUndo','DnsUndo','NetUndo','FileUndo')) {
         $script:State[$p] = @($script:State[$p])
     }
 }
@@ -479,6 +480,32 @@ function Get-PowerVal {
     return $null
 }
 
+function Set-PowerPlan {
+    # Aktywacja CALEGO planu zasilania (osobna operacja niz Set-Power = zmiana parametrow planu).
+    param([string]$PlanName = 'HighPerformance')
+    if ($script:DryRun) { Write-Info "[DRY-RUN] powercfg /setactive plan '$PlanName'"; return $true }
+    Assert-Backup
+    $plans = @(& powercfg.exe /list 2>$null)
+    $text = ($plans -join "`n")
+    $rx = [regex]'(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*\(([^)]*' + [regex]::Escape($PlanName) + '[^)]*)\)'
+    $m = [regex]::Match($text, $rx)
+    $guid = $null
+    if ($m.Success) { $guid = $m.Groups[1].Value }
+    else {
+        $aliases = @('8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c')  # High Performance
+        foreach ($a in $aliases) { if ($text -match $a) { $guid = $a; break } }
+    }
+    if (-not $guid) { Write-Warn "Plan '$PlanName' niedostepny na tym komputerze - pomijam."; return $false }
+    if (-not $script:State.PreviousPowerScheme) {
+        $active = [regex]::Match($text, '(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*\*')
+        if ($active.Success) { $script:State.PreviousPowerScheme = $active.Groups[1].Value; Write-State }
+    }
+    & powercfg.exe /setactive $guid 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Ok "Plan zasilania aktywowany: $PlanName ($guid)"; return $true }
+    Write-Warn "Nie udalo sie aktywowac planu '$PlanName' (powercfg exit $LASTEXITCODE)."
+    return $false
+}
+
 function Set-Power {
     [CmdletBinding()]
     param([string]$SubG,[string]$Setting,[string]$Val,[ValidateSet('AC','DC')][string]$AcDc='AC')
@@ -637,6 +664,14 @@ function Set-Network {
     }
     try {
         Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+            # Backup stanu adaptera PRZED zmiana (RSC, zarzadzanie energia, PnPCapabilities).
+            if (-not ($script:State.NetUndo | Where-Object { $_.Name -eq $_.Name })) {
+                $rsc = $null; $pm = $null
+                try { $rsc = (Get-NetAdapterRsc -Name $_.Name -ErrorAction Stop).IPv4 } catch {}
+                try { $pm  = (Get-NetAdapterPowerManagement -Name $_.Name -ErrorAction Stop).AllowComputerToTurnOffDevice } catch {}
+                $script:State.NetUndo += [pscustomobject]@{ Name=$_.Name; RscIPv4=$rsc; RscIPv6=$rsc; PowerMgmt=$pm; PnPCapabilities=$null }
+            }
+            $nu = $script:State.NetUndo | Where-Object { $_.Name -eq $_.Name } | Select-Object -First 1
             Disable-NetAdapterRsc -Name $_.Name -IPv4 -IPv6 -ErrorAction SilentlyContinue
             Disable-NetAdapterPowerManagement -Name $_.Name -ErrorAction SilentlyContinue
             $did = if ($_.PnPDeviceID) { [string]$_.PnPDeviceID } else { [string]$_.DeviceID }
@@ -646,6 +681,7 @@ function Set-Network {
             if ($nk) {
                 $cur = 0
                 try { $cur = [int](Get-ItemPropertyValue $nk.PSPath PnPCapabilities -ErrorAction SilentlyContinue) } catch {}
+                if ($nu -and $null -eq $nu.PnPCapabilities) { $nu.PnPCapabilities = $cur; Write-State }
                 Set-Reg -Path $nk.PSPath -Name PnPCapabilities -Value ($cur -bor 24) -Type DWord
             }
         }
@@ -653,6 +689,31 @@ function Set-Network {
     Write-Ok 'TCP/IP: Nagle off, QoS 0%, NIC power off.'
     $script:RebootNeeded=$true; Add-Applied 'net-tcp'
 }
+function Restore-NetUndo {
+    foreach ($e in @($script:State.NetUndo)) {
+        if ($null -ne $e.RscIPv4) {
+            try { Enable-NetAdapterRsc -Name $e.Name -IPv4 -ErrorAction Stop } catch { try { Set-NetAdapterRsc -Name $e.Name -IPv4 $true -ErrorAction Stop } catch {} }
+        }
+        if ($null -ne $e.PowerMgmt) {
+            try { Enable-NetAdapterPowerManagement -Name $e.Name -ErrorAction Stop } catch {}
+        }
+        foreach ($ap in @($e.AdvProps)) {
+            if (-not $ap.HadValue) { continue }
+            try { Set-NetAdapterAdvancedProperty -Name $e.Name -RegistryKeyword $ap.Keyword -RegistryValue $ap.OldValue -NoRestart -ErrorAction Stop | Out-Null
+                  Write-Ok "NIC przywrocone: $($e.Name) $($ap.Keyword)=$($ap.OldValue)" }
+            catch { Write-Warn "Nie przywrocono $($ap.Keyword) dla $($e.Name)." }
+        }
+    }
+}
+
+function Restore-FileUndo {
+    foreach ($e in @($script:State.FileUndo)) {
+        try { Set-Content -LiteralPath $e.Path -Value $e.OldContent -Encoding UTF8 -Force
+              Write-Ok "Plik przywrocony: $($e.Path)" }
+        catch { Write-Warn "Nie przywrocono pliku $($e.Path): $($_.Exception.Message)" }
+    }
+}
+
 function Set-AutoDns {
     Write-Step 'DNS: automatyczny najszybszy (15 serwerow)'
     $dns = @(
@@ -672,22 +733,49 @@ function Set-AutoDns {
         @{N='Freenom';A='80.80.80.80';B='80.80.81.81'},
         @{N='Mullvad';A='194.242.2.2';B='185.222.222.222'}
     )
-    $best=$null; $bestMs=9999
+    # Pomiar REALNYM zapytaniem DNS (Resolve-DnsName), nie ICMP pingiem - ping mierzy
+    # tylko echo, nie czas odpowiedzi resolvera.
+    $best=$null; $bestMs=[double]::MaxValue
     foreach ($d in $dns) {
-        $r = Test-Connection -ComputerName $d.A -Count 2 -ErrorAction SilentlyContinue | Measure-Object ResponseTime -Average
-        if ($r -and $r.Average) {
-            $ms = [math]::Round($r.Average,1)
-            Write-Host "     $($d.N): $ms ms" -ForegroundColor DarkGray
+        try {
+            $sw=[System.Diagnostics.Stopwatch]::StartNew()
+            $null = Resolve-DnsName -Name $d.A -Type A -DnsOnly -ErrorAction Stop
+            $sw.Stop()
+            $ms=[math]::Round($sw.Elapsed.TotalMilliseconds,1)
+            Write-Host "     $($d.N): $ms ms (zapytanie DNS)" -ForegroundColor DarkGray
             if ($ms -lt $bestMs) { $bestMs=$ms; $best=$d }
-        }
+        } catch { Write-Host "     $($d.N): niedostepny" -ForegroundColor DarkGray }
     }
-    if (-not $best) { Write-Warn 'Nie mozna sprawdzic DNS.'; return }
-    Write-Ok "Najszybszy: $($best.N) ($bestMs ms)"
+    if (-not $best) { Write-Warn 'Zaden resolver DNS nie odpowiedzial - NIE zmieniam konfiguracji.'; return }
+    Write-Ok "Najszybszy resolver: $($best.N) ($bestMs ms)"
     Assert-Backup
     Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+        # Backup oryginalnej konfiguracji DNS interfejsu (wszystkie adresy + DHCP) przed zmiana.
+        if (-not ($script:State.DnsUndo | Where-Object { $_.IfIndex -eq $_.ifIndex })) {
+            try {
+                $cur = Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ErrorAction Stop
+                $script:State.DnsUndo += [pscustomobject]@{
+                    IfIndex=$_.ifIndex; InterfaceAlias=$_.Name
+                    ServerAddresses=@($cur.ServerAddresses); Dhcp=($cur.ConnectionSpecificSuffix -ne $null -and $cur.ServerAddresses.Count -eq 0)
+                }
+            } catch { $script:State.DnsUndo += [pscustomobject]@{ IfIndex=$_.ifIndex; InterfaceAlias=$_.Name; ServerAddresses=@(); Dhcp=$true } }
+            Write-State
+        }
         Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ($best.A,$best.B) -ErrorAction SilentlyContinue
     }
     Write-Ok "DNS ustawione na $($best.N)."; Add-Applied "net-dns-$($best.N)"
+}
+function Restore-DnsUndo {
+    foreach ($e in @($script:State.DnsUndo)) {
+        try {
+            if ($e.Dhcp -eq $true -or @($e.ServerAddresses).Count -eq 0) {
+                Set-DnsClientServerAddress -InterfaceIndex $e.IfIndex -ResetServerAddresses -ErrorAction Stop
+            } else {
+                Set-DnsClientServerAddress -InterfaceIndex $e.IfIndex -ServerAddresses @($e.ServerAddresses) -ErrorAction Stop
+            }
+            Write-Ok ("DNS przywrocone: {0} -> {1}" -f $e.InterfaceAlias, (($e.ServerAddresses -join ', ') -replace '^$','DHCP'))
+        } catch { Write-Warn "Nie przywrocono DNS dla interfejsu $($e.InterfaceAlias): $($_.Exception.Message)" }
+    }
 }
 function Set-MsiMode {
     Write-Step 'MSI Mode dla GPU/NIC/dyskow (niskie DPC)'
@@ -740,13 +828,27 @@ function Set-NetworkLatency {
         foreach($n in $nics){
             # DeviceID nie odpowiada numerowi klucza 0000/0001 w rejestrze. Uzywamy
             # udokumentowanego cmdletu i tylko wlasciwosci obslugiwanych przez sterownik.
+            # RSS NIE jest wylaczane globalnie: na wielu CPU zwieksza to obciazenie jednego rdzenia.
             foreach($name in @('*LsoV2IPv4','*LsoV2IPv6','*TCPUDPChecksumOffloadIPv4','*TCPUDPChecksumOffloadIPv6',
                 '*IPChecksumOffloadIPv4','*TCPChecksumOffloadIPv4','*TCPChecksumOffloadIPv6','*UDPChecksumOffloadIPv4',
-                '*UDPChecksumOffloadIPv6','*RscIPv4','*RscIPv6','*InterruptModeration','*RSS')){
+                '*UDPChecksumOffloadIPv6','*RscIPv4','*RscIPv6','*InterruptModeration')){
                 try {
-                    Set-NetAdapterAdvancedProperty -Name $n.Name -RegistryKeyword $name -RegistryValue '0' -NoRestart -ErrorAction Stop | Out-Null
-                    $changed++
-                } catch {}
+                    $cur = Get-NetAdapterAdvancedProperty -Name $n.Name -RegistryKeyword $name -ErrorAction Stop
+                    # Backup tylko wartosci, ktora faktycznie zmieniamy i ktora byla inna.
+                    if (-not ($script:State.NetUndo | Where-Object { $_.Name -eq $n.Name })) {
+                        $script:State.NetUndo += [pscustomobject]@{ Name=$n.Name; AdvProps=@() }
+                        Write-State
+                    }
+                    $nu = $script:State.NetUndo | Where-Object { $_.Name -eq $n.Name } | Select-Object -First 1
+                    if (-not ($nu.AdvProps | Where-Object { $_.Keyword -eq $name })) {
+                        $nu.AdvProps += [pscustomobject]@{ Keyword=$name; OldValue=$cur.RegistryValue; HadValue=($null -ne $cur.RegistryValue) }
+                        Write-State
+                    }
+                    if ($cur.RegistryValue -ne '0') {
+                        Set-NetAdapterAdvancedProperty -Name $n.Name -RegistryKeyword $name -RegistryValue '0' -NoRestart -ErrorAction Stop | Out-Null
+                        $changed++
+                    }
+                } catch { Write-Info "Pomijam $name dla $($n.Name) (nieobslugiwane przez sterownik)." }
             }
         }
         # Disable Nagle globalnie
@@ -777,8 +879,8 @@ function Disable-WidgetsCopilot {
     Write-Step 'UI: Widgety/Copilot/Teams autostart OFF'
     Assert-Backup
     $policies='HKCU:\SOFTWARE\Policies\Microsoft\Windows'
-    New-Item "$policies\Windows Copilot" -Force -ErrorAction SilentlyContinue | Out-Null
-    Set-Reg "$policies\Windows Copilot" TurnOffWindowsCopilot 1 DWord
+    New-Item "$policies\WindowsCopilot" -Force -ErrorAction SilentlyContinue | Out-Null
+    Set-Reg "$policies\WindowsCopilot" TurnOffWindowsCopilot 1 DWord
     New-Item "$policies\Windows\Explorer" -Force -ErrorAction SilentlyContinue | Out-Null
     Set-Reg "$policies\Windows\Explorer" DisableNewsAndInterests 1 DWord
     Set-Reg 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced' TaskbarDa 0 DWord
@@ -941,13 +1043,19 @@ function Disable-DiscordAccel {
     foreach ($p in $paths) {
         if(Test-Path $p){
             try {
-                $j = Get-Content $p -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if($j){
-                    $j | Add-Member -Force -NotePropertyMembers @{hardwareAcceleration=$false; disableHardwareAcceleration=$true}
-                    $j | ConvertTo-Json -Depth 10 | Set-Content $p -Encoding UTF8 -Force
-                    $fixed++
+                $raw = Get-Content $p -Raw
+                $j = $raw | ConvertFrom-Json -ErrorAction Stop
+                # Backup dokladnej poprzedniej zawartosci pliku (przywracanie = kopia bajtow).
+                if (-not ($script:State.FileUndo | Where-Object { $_.Path -eq $p })) {
+                    $script:State.FileUndo += [pscustomobject]@{ Path=$p; OldContent=$raw }
+                    Write-State
                 }
-            } catch {}
+                $j | Add-Member -Force -NotePropertyMembers @{hardwareAcceleration=$false; disableHardwareAcceleration=$true}
+                $newRaw = $j | ConvertTo-Json -Depth 10
+                $null = $newRaw | ConvertFrom-Json -ErrorAction Stop   # walidacja przed zapisem
+                Set-Content $p -Value $newRaw -Encoding UTF8 -Force
+                $fixed++
+            } catch { Write-Warn "Pominieto $p (blad JSON lub brak dostepu) - plik NIE nadpisany." }
         }
     }
     Write-Ok "Wykonano dla $fixed aplikacji Electron/Discord."; Add-Applied 'discord-accel'
@@ -980,7 +1088,7 @@ function Disable-DeliveryOptimization {
 }
 function Invoke-ProBalance {
     Write-Step 'ProBalance Watcher (inteligentna regulacja priorytetow w tle)'
-    if(-not $script:Licensed){ Write-Err 'Tylko w pelnej wersji.'; return }
+    if (-not (Assert-Premium -Feature 'ProBalance Watcher')) { return }
     $script:PBJob = Start-Job -ScriptBlock {
         $gameList = @('cs2','csgo','valorant-win64-shipping','fortniteclient-win64-shipping','r5apex','escapefromtarkov',
             'leagueclient','overwatch','rainbowsix','pubg','dota2','gta5','gtav','warzone','rocketleague','minecraft')
@@ -1021,7 +1129,7 @@ function Invoke-ProBalance {
 }
 function Invoke-SmartISLC {
     Write-Step 'Smart ISLC: inteligentne czyszczenie RAM (progi zalezne od RAMu)'
-    if(-not $script:Licensed){ Write-Err 'Tylko w pelnej wersji.'; return }
+    if (-not (Assert-Premium -Feature 'Smart ISLC')) { return }
     # Progi wg zalecen ISLC Wagnard: standby >= X i free < Y
     $ramGB=[math]::Round(((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB),0)
     if($ramGB -ge 64){$standbyThresh=4096MB;$freeThresh=8192MB}
@@ -1064,9 +1172,9 @@ namespace D01iSLC {
 function Disable-USBSelectiveSuspend {
     Write-Step 'USB: Selective Suspend OFF (mysz/klawiatura nie idzie spac)'
     Assert-Backup
-    # Wylacz w planie zasilania
-    & powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
-    & powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0 2>&1 | Out-Null
+    # Wylacz w planie zasilania przez wspolny mechanizm backupu PowerUndo (AC i DC)
+    Set-Power '2a737441-1930-4402-8d77-b2bebba308a3' '48e6b7a6-50f5-4782-a5d4-53bb8f07e226' '0' 'AC'
+    Set-Power '2a737441-1930-4402-8d77-b2bebba308a3' '48e6b7a6-50f5-4782-a5d4-53bb8f07e226' '0' 'DC'
     # USB disable selective suspend na wszystkich hubach w rejestrze
     $usbPath='HKLM:\SYSTEM\CurrentControlSet\Services\USB'
     Set-Reg $usbPath DisableSelectiveSuspend 1 DWord
@@ -1141,8 +1249,8 @@ function Set-MouseMenuDelay {
     Assert-Backup
     Set-Reg 'HKCU:\Control Panel\Desktop' MenuShowDelay 0 String
     Set-Reg 'HKCU:\Control Panel\Mouse' MouseHoverTime 0 String
-    Set-Reg 'HKCU:\Control Panel\Mouse' DoubleClickSpeed 50 String
-    Write-Ok 'MenuShowDelay=0, MouseHoverTime=0.'; Add-Applied 'mouse-menu'
+    # DoubleClickSpeed NIE jest ruszane: 50 ms powoduje przypadkowe podwojne klikniecia.
+    Write-Ok 'MenuShowDelay=0, MouseHoverTime=0 (DoubleClickSpeed bez zmian).'; Add-Applied 'mouse-menu'
 }
 function Test-NetworkPing {
     Write-Step 'Test pingu i jittera'
@@ -1227,50 +1335,70 @@ function Restore-TaskUndo {
 }
 function Invoke-Undo {
     Write-Step 'COFANIE WSZYSTKICH ZMIAN'
-    Write-Warn 'Przywraca zapisane ustawienia rejestru, uslug, zadan i wykluczen Defendera.'
+    Write-Warn 'Przywraca zapisane ustawienia rejestru, uslug, zadan, wykluczen Defendera, DNS, NIC, plikow, powercfg i BCD.'
     if(-not (Read-YesNo 'NA PEWNO cofnac wszystkie zmiany?')){ return }
 
-    if($script:State.LastBackupDir -and (Test-Path -LiteralPath $script:State.LastBackupDir)){
-        Write-Host '   Przywracam backup rejestru...' -ForegroundColor Cyan
-        Get-ChildItem -LiteralPath $script:State.LastBackupDir -Filter *.reg -ErrorAction SilentlyContinue | ForEach-Object {
-            & reg.exe import $_.FullName 2>&1 | Out-Null
+    # Kazdy element ma WLASNY status - czesciowy blad nie kasuje pozostalych backupow.
+    $results = [System.Collections.Generic.List[string]]::new()
+    $failures = [System.Collections.Generic.List[string]]::new()
+
+    # 1) rejestr z katalogu backupu (jesli istnieje)
+    if ($script:State.LastBackupDir -and (Test-Path -LiteralPath $script:State.LastBackupDir)) {
+        $regs = @(Get-ChildItem -LiteralPath $script:State.LastBackupDir -Filter *.reg -ErrorAction SilentlyContinue)
+        $impOk = 0
+        foreach ($f in $regs) {
+            & reg.exe import $f.FullName 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { $impOk++ } else { $failures.Add("reg import $($f.Name)") }
         }
-        Write-Ok 'Backup rejestru przywrocony.'
+        if ($regs.Count -gt 0 -and $impOk -eq $regs.Count) { $results.Add("rejestr z katalogu backupu ($impOk plikow)"); }
+        elseif ($regs.Count -gt 0) { $results.Add("rejestr z katalogu backupu ($impOk/$($regs.Count) plikow)"); }
+    } else { $failures.Add('brak katalogu backupu rejestru'); }
+
+    # 2) pozostale mechanizmy - kazdy w osobnym try/catch
+    $steps = @(
+        @{ Name='rejestr (RegUndo)';            Script={ Restore-RegistryUndo } },
+        @{ Name='utworzone klucze rejestru';    Script={ Restore-CreatedRegistryKeys } },
+        @{ Name='uslugi';                       Script={ Restore-ServiceUndo } },
+        @{ Name='zadania harmonogramu';         Script={ Restore-TaskUndo } },
+        @{ Name='DNS interfejsow';              Script={ Restore-DnsUndo } },
+        @{ Name='ustawienia kart sieciowych';   Script={ Restore-NetUndo } },
+        @{ Name='pliki aplikacji';              Script={ Restore-FileUndo } },
+        @{ Name='BCD';                          Script={ Restore-Bcd } },
+        @{ Name='powercfg (PowerUndo)';         Script={ Restore-PowerUndo } }
+    )
+    foreach ($st in $steps) {
+        try { & $st.Script; $results.Add($st.Name) }
+        catch { $failures.Add("$($st.Name): $($_.Exception.Message)") }
     }
-    Restore-RegistryUndo
-    Restore-CreatedRegistryKeys
-    Restore-ServiceUndo
-    Restore-TaskUndo
 
     try { Unregister-ScheduledTask -TaskName $script:AutoRunTaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Startup')) 'd01i_premium_autorun.bat') -Force -ErrorAction SilentlyContinue
 
     if ($script:State.HibernationWasEnabled -eq $true) { & powercfg.exe /hibernate on 2>&1 | Out-Null }
     elseif ($script:State.HibernationWasEnabled -eq $false) { & powercfg.exe /hibernate off 2>&1 | Out-Null }
+    # Przywracamy poprzedni aktywny plan NA KONCU (po przywroceniu jego parametrow).
     if ($script:State.PreviousPowerScheme) { & powercfg.exe /setactive $script:State.PreviousPowerScheme 2>&1 | Out-Null }
 
-    Restore-Bcd
-    Restore-PowerUndo
-
-    $failedNote = ''
-    if (-not ($script:State.LastBackupDir -and (Test-Path -LiteralPath $script:State.LastBackupDir))) { $failedNote += ' brak katalogu backupu rejestru;' }
-
-    $script:State = [ordered]@{
-        Version='2.5'; LastBackupDir=''; RegUndo=@(); ServiceUndo=@(); DisabledTasks=@()
-        VbsDisabled=$false; CreatedUltimate=$false; UltimateSchemeGuid=''; PreviousPowerScheme=''
-        HibernationWasEnabled=$null; Applied=@(); MsiTouched=@(); CreatedRegistryKeys=@()
+    # Stan resetujemy TYLKO gdy wszystko sie powiodlo - inaczej zostaje do ponownego UNDO.
+    if ($failures.Count -eq 0) {
+        $script:State = [ordered]@{
+            Version='2.5'; LastBackupDir=''; RegUndo=@(); ServiceUndo=@(); DisabledTasks=@()
+            VbsDisabled=$false; CreatedUltimate=$false; UltimateSchemeGuid=''; PreviousPowerScheme=''
+            HibernationWasEnabled=$null; Applied=@(); MsiTouched=@(); CreatedRegistryKeys=@()
+            BcdUndo=@(); PowerUndo=@(); DnsUndo=@(); NetUndo=@(); FileUndo=@()
+        }
+        Write-State
+        $script:BackupDone=$false
+        Write-Ok 'Cofanie zakonczone pelnym sukcesem - stan wyczyszczony.'
+    } else {
+        Write-Warn 'Cofanie CZES CIOWE - backupy NIE zostaly usuniete (ponow opcja 16, aby sprobowac ponownie).'
     }
-    Write-State
-    $script:BackupDone=$false
     $script:RebootNeeded=$true
     Write-Host ''
-    Write-Host ''
     Write-Host '  RAPORT COFANIA:' -ForegroundColor Cyan
-    Write-Host '   - rejestr/uslugi/zadania/powercfg/BCD: przywracane tylko z zapisanych stanow.'
-    if ($failedNote) { Write-Warn ("  UWAGI:$failedNote") }
+    foreach ($r in $results) { Write-Host "   [OK]    $r" -ForegroundColor Green }
+    foreach ($f in $failures) { Write-Host "   [BLAD]  $f" -ForegroundColor Red }
     Write-Host '   - punkt przywracania systemu i katalog backupu rejestru NIE sa usuwane.'
-    Write-Host '   - jesli ktorys krok sie nie powiodl, wpis zostal w d01i_state.json - ponow cofanie.'
-    Write-Ok 'Cofanie zakonczone (szczegoly powyzej). Zrestartuj komputer.'
     if(Read-YesNo 'Zrestartowac TERAZ?'){ Restart-Computer -Force }
 }
 
@@ -1310,7 +1438,7 @@ function Invoke-SelfTest {
     $mp='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
     CK $cat 'SystemResponsiveness=0' ((GW $mp SystemResponsiveness) -eq 0) '0' (GW $mp SystemResponsiveness)
     CK $cat 'NetworkThrottling=-1' ((GW $mp NetworkThrottlingIndex) -eq 0xFFFFFFFF) 'FFFFFFFF' (GW $mp NetworkThrottlingIndex)
-    CK $cat 'Win32PrioritySeparation=42' ((GW 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' Win32PrioritySeparation) -eq 42) '42' (GW 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' Win32PrioritySeparation)
+    CK $cat 'Win32PrioritySeparation=38' ((GW 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' Win32PrioritySeparation) -eq 38) '38' (GW 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' Win32PrioritySeparation)
     CK $cat 'GameDVR off' ((GW 'HKCU:\System\GameConfigStore' GameDVR_Enabled) -eq 0) '0' (GW 'HKCU:\System\GameConfigStore' GameDVR_Enabled)
     CK $cat 'GameMode on' ((GW 'HKCU:\SOFTWARE\Microsoft\GameBar' AutoGameModeEnabled) -eq 1) '1' (GW 'HKCU:\SOFTWARE\Microsoft\GameBar' AutoGameModeEnabled)
 
@@ -1371,7 +1499,7 @@ function Invoke-ProfileSafe {
     # DEMO/SAFE: tylko bezpieczne, uniwersalne optymalizacje (bez licencji lub z licencja).
     Write-Step 'PROFIL SAFE (bezpieczny)'
     Assert-Backup
-    Set-Power 'HighPerformance'
+    Set-PowerPlan 'HighPerformance'
     Disable-VisualFX
     Disable-WidgetsCopilot
     Disable-StickyKeys
@@ -1381,7 +1509,7 @@ function Invoke-ProfileBalanced {
     if (-not (Assert-Premium -Feature 'Profil BALANCED')) { Wait-Enter; return }
     Write-Step 'PROFIL BALANCED (polecany)'
     Assert-Backup
-    Set-Power 'HighPerformance'
+    Set-PowerPlan 'HighPerformance'
     Set-Network
     Set-AutoDns
     Set-MouseFix
@@ -1404,7 +1532,7 @@ function Invoke-ProfileAdvanced {
 }
 
 function Invoke-ProfileBalancedSafe {
-    Set-Power 'HighPerformance'; Set-Network; Set-AutoDns; Set-MouseFix
+    Set-PowerPlan 'HighPerformance'; Set-Network; Set-AutoDns; Set-MouseFix
     Disable-VisualFX; Disable-WidgetsCopilot; Set-Mmcss; Set-Priority
 }
 function Invoke-FullProfile {
@@ -1567,7 +1695,7 @@ do {
         '08' { Invoke-SelfTest }
         '09' { New-Diag }
         '11' { if(Assert-Premium){ Assert-Backup; Set-NetworkLatency; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '12' { Invoke-SmartISLC; Wait-Enter }
+        '12' { if(Assert-Premium){ Invoke-SmartISLC } else { Write-Err 'Tylko pelna wersja.' }; Wait-Enter }
         '13' { Test-NetworkPing }
         '30' { if(Assert-Premium){ Disable-DiscordAccel; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
         '31' { if(Assert-Premium){ Set-NvidiaShaderCache; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
@@ -1578,7 +1706,7 @@ do {
         '16' { Invoke-Undo; Wait-Enter }
         '17' { if(Assert-Premium){ Disable-VisualFX; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
         '19' { if(Assert-Premium){ Invoke-GamePriorityWatcher; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
-        '20' { Disable-Win11Context; Disable-ReservedStorage; Wait-Enter }
+        '20' { if(Assert-Premium){ Disable-Win11Context; Disable-ReservedStorage } else { Write-Err 'Tylko pelna wersja.' }; Wait-Enter }
         '21' { if(Assert-Premium){ Set-AutostartGame } else { Write-Err 'Tylko pelna wersja.' }; Wait-Enter }
         '22' { if(Assert-Premium){ Set-MouseMenuDelay; Wait-Enter } else { Write-Err 'Tylko pelna wersja.'; Wait-Enter } }
         '0'  { }

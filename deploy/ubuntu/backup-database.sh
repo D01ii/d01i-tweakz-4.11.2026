@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # D01i Tweakz - backup bazy PostgreSQL (R7: SZYFROWANY, fail-closed, z rotacja i checksum).
-# Wymaga klucza szyfrujacego POZA serwerem backupów: BACKUP_KEY_FILE (domyslnie
+# Wymaga klucza szyfrujacego POZA serwerem backupow: BACKUP_KEY_FILE (domyslnie
 # /etc/d01i-tweakz/backup.key, 600 root:root, 32 bajty raw lub hex). Bez klucza skrypt
 # NIE wykona nieszyfrowanego backupu.
 set -euo pipefail

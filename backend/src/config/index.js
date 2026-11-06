@@ -51,6 +51,9 @@ export const config = {
     max: int(process.env.DB_POOL_MAX, 10),
     idleTimeoutMillis: int(process.env.DB_IDLE_TIMEOUT_MS, 30000),
     connectionTimeoutMillis: int(process.env.DB_CONNECT_TIMEOUT_MS, 5000),
+    // R7: opcjonalny osobny uzytkownik migracyjny (polaczony w jeden obiekt db - osobny
+    // klucz "db" nadpisalby ustawienia puli).
+    migrationsUrl: process.env.MIGRATIONS_DATABASE_URL || null,
   },
   security: {
     // "Pepper" do haszowania IP / HWID - losowy sekret serwera, nigdy nie wychodzi na zewnatrz.
@@ -71,8 +74,12 @@ export const config = {
     maxDevicesDefault: int(process.env.MAX_DEVICES_DEFAULT, 2),
   },
   admin: {
-    // R7: wymuszaj MFA dla wszystkich kont adminów (zalecane w produkcji: ADMIN_REQUIRE_MFA=true)
-    mfaRequired: bool(process.env.ADMIN_REQUIRE_MFA, false),
+    // R7/R8: wymuszaj MFA dla kont adminow. W produkcji fail-closed: bez jawnego
+    // ADMIN_REQUIRE_MFA=false MFA jest WYMAGANE; w dev domyslnie off.
+    mfaRequired: (() => {
+      if (process.env.ADMIN_REQUIRE_MFA !== undefined) return bool(process.env.ADMIN_REQUIRE_MFA, false);
+      return (process.env.NODE_ENV === 'production');
+    })(),
     bootstrapEnabled: bool(process.env.ADMIN_BOOTSTRAP_ENABLED, false),
     bootstrapUsername: process.env.ADMIN_BOOTSTRAP_USERNAME || 'admin',
     bootstrapPassword: process.env.ADMIN_BOOTSTRAP_PASSWORD || '',
@@ -95,11 +102,16 @@ export const config = {
     enabled: bool(process.env.DISCORD_WEBHOOK_ENABLED, false),
     url: process.env.DISCORD_WEBHOOK_URL || '',
   },
-  db: { migrationsUrl: process.env.MIGRATIONS_DATABASE_URL || null }, // R7: opcjonalny osobny użytkownik migracyjny
   secrets: {
-    // R7: osobny pepper do HMAC hashy kluczy licencyjnych (NIE ten sam co SECURITY_PEPPER).
-    // Fallback do SECURITY_PEPPER tylko dla kompatybilnosci; w produkcji ustaw LICENSE_KEY_PEPPER.
-    licenseKeyPepper: process.env.LICENSE_KEY_PEPPER || process.env.SECURITY_PEPPER || (() => {
+    // R7/R8: osobny pepper do HMAC hashy kluczy licencyjnych (NIE ten sam co SECURITY_PEPPER).
+    // W produkcji LICENSE_KEY_PEPPER jest WYMAGANY i nie ma fallbacku do SECURITY_PEPPER
+    // (fail-closed); fallback istnieje tylko poza produkcja dla kompatybilnosci.
+    licenseKeyPepper: (() => {
+      if (process.env.LICENSE_KEY_PEPPER) return process.env.LICENSE_KEY_PEPPER;
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('Produkcja wymaga osobnego LICENSE_KEY_PEPPER (nie uzywamy fallbacku SECURITY_PEPPER). Wygeneruj: openssl rand -hex 32');
+      }
+      if (process.env.SECURITY_PEPPER) return process.env.SECURITY_PEPPER;
       if (bool(process.env.ALLOW_EPHEMERAL_KEYS, false)) return 'dev-only-pepper-not-for-production';
       throw new Error('Brak LICENSE_KEY_PEPPER. Wygeneruj: openssl rand -hex 32');
     })(),
