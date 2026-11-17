@@ -1,0 +1,36 @@
+[Unit]
+Description=D01i Tweakz Backend (Node.js + Express + PostgreSQL)
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=d01i
+Group=d01i
+WorkingDirectory=/opt/d01i-tweakz
+EnvironmentFile=/etc/d01i-tweakz/.env
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=5
+# --- twardnienie (R7) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+# aplikacja nie zapisuje na dysku (logi przez journald) — tylko katalog roboczy do odczytu
+ReadWritePaths=/var/log/d01i-tweakz
+UMask=0027
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

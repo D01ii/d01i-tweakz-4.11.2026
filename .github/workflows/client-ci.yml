@@ -1,0 +1,172 @@
+# CI klienta PowerShell — Windows PowerShell 5.1 (wbudowany) + PowerShell 7.
+# Uruchamia: parsowanie wszystkich skryptów, import modułu licencyjnego,
+# testy jednostkowe logiki klienta (mock API) oraz skan ASCII.
+name: client-powershell-ci
+
+on:
+  push:
+    branches: [arena/1c72ad7f-d01i-tweakz-4-11-2026, main]
+  pull_request:
+
+jobs:
+  parse-ps51:
+    name: Parser Windows PowerShell 5.1
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parsuj wszystkie skrypty PS 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -Recurse -Include *.ps1,*.psm1 client, deploy | Where-Object { $_.Name -notmatch 'test' }
+          $fail = 0
+          foreach ($f in $files) {
+            $errs = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errs)
+            if ($errs.Count -gt 0) { $fail++; Write-Host "FAIL $($f.FullName): $($errs[0].Message) (linia $($errs[0].Extent.StartLineNumber))" -ForegroundColor Red }
+            else { Write-Host "OK   $($f.FullName)" -ForegroundColor Green }
+          }
+          if ($fail -gt 0) { exit 1 }
+
+  parse-ps7:
+    name: Parser PowerShell 7
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parsuj wszystkie skrypty PS7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -Recurse -Include *.ps1,*.psm1 client, deploy
+          $fail = 0
+          foreach ($f in $files) {
+            $errs = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errs)
+            if ($errs.Count -gt 0) { $fail++; Write-Host "FAIL $($f.FullName): $($errs[0].Message)" -ForegroundColor Red }
+          }
+          if ($fail -gt 0) { exit 1 }
+          Write-Host "PS7: wszystkie pliki OK"
+
+  module-import-and-license:
+    name: Import modułu + testy licencji (mock API)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import D01iLicense.psm1 i testy jednostkowe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ./client/common/D01iLicense.psm1 -Force
+          # 1) bez konfiguracji API -> CONFIG_MISSING i brak połączenia
+          $env:D01I_API_BASE = $null
+          $v = Test-D01iApiBase
+          if ($v.ok) { throw 'oczekiwano CONFIG_MISSING' }
+          if ($v.error -ne 'CONFIG_MISSING') { throw "zly kod: $($v.error)" }
+          # 2) niepoprawny URL
+          $env:D01I_API_BASE = 'nie-url'
+          if ((Test-D01iApiBase).ok) { throw 'nie-url zaakceptowany' }
+          # 3) HTTP spoza localhost -> odmowa
+          $env:D01I_API_BASE = 'http://example.com'
+          $v = Test-D01iApiBase
+          if ($v.ok -or $v.error -ne 'HTTP_NOT_ALLOWED') { throw "HTTP zewnętrzne zaakceptowane: $($v.error)" }
+          # 4) HTTP localhost + dev flag -> OK
+          $env:D01I_API_BASE = 'http://127.0.0.1:8080'; $env:D01I_ALLOW_HTTP = '1'
+          if (-not (Test-D01iApiBase).ok) { throw 'localhost dev odrzucone' }
+          # 5) HTTPS OK
+          $env:D01I_API_BASE = 'https://api.example.com'; $env:D01I_ALLOW_HTTP = $null
+          if (-not (Test-D01iApiBase).ok) { throw 'HTTPS odrzucone' }
+          # 6) HWID i install_id są stabilne i niepuste
+          $h1 = Get-D01iHwid; $h2 = Get-D01iHwid; $i1 = Get-D01iInstallId; $i2 = Get-D01iInstallId
+          if ($h1 -ne $h2 -or $i1 -ne $i2 -or $h1.Length -lt 8 -or $i1.Length -lt 8) { throw 'HWID/install_id niestabilne' }
+          # 7) walidacja bez licencji -> NO_LICENSE (nie rzuca)
+          $lic = Test-D01iLicense
+          if ($lic.valid -or $lic.reason -ne 'NO_LICENSE') { throw "oczekiwano NO_LICENSE, dostano $($lic.reason)" }
+          Write-Host 'Testy modułu licencyjnego: PASS'
+      - name: Testy HWID z mockami CIM (nie zaleza od sprzetu runnera)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ./client/common/D01iLicense.psm1 -Force
+          # Mock CIM: pelne dane
+          function global:Get-CimInstance {
+            param([string]$ClassName)
+            switch ($ClassName) {
+              'Win32_Processor' { return @([pscustomobject]@{ProcessorId='BFEBFBFF000906EA'}) }
+              'Win32_BaseBoard' { return @([pscustomobject]@{SerialNumber='MB-123456'}) }
+              'Win32_DiskDrive' { return @([pscustomobject]@{Index=0;SerialNumber='SSD-789'}) }
+            }
+          }
+          $h1 = Get-D01iHwid; $h2 = Get-D01iHwid
+          if ($h1 -ne $h2 -or $h1.Length -ne 16) { throw "HWID niestabilny: $h1" }
+          # Mock CIM: puste numery seryjne -> JAWNY blad (nie wolno produkowac pustego HWID)
+          function global:Get-CimInstance {
+            param([string]$ClassName)
+            switch ($ClassName) {
+              'Win32_Processor' { return @([pscustomobject]@{ProcessorId=''}) }
+              'Win32_BaseBoard' { return @([pscustomobject]@{SerialNumber='To be filled by O.E.M.'}) }
+              'Win32_DiskDrive' { return @([pscustomobject]@{Index=0;SerialNumber=''}) }
+            }
+          }
+          $threw = $false
+          try { $null = Get-D01iHwid } catch { $threw = $true }
+          if (-not $threw) { throw 'Puste/zastępcze numery seryjne MUSZA rzucic blad HWID' }
+          # Mock CIM: czesciowo niedostepny sprzet (brak dysku 0)
+          function global:Get-CimInstance {
+            param([string]$ClassName)
+            switch ($ClassName) {
+              'Win32_Processor' { return @([pscustomobject]@{ProcessorId='BFEBFBFF000906EA'}) }
+              'Win32_BaseBoard' { return @([pscustomobject]@{SerialNumber='MB-123456'}) }
+              'Win32_DiskDrive' { return @() }
+            }
+          }
+          $threw2 = $false
+          try { $null = Get-D01iHwid } catch { $threw2 = $true }
+          if (-not $threw2) { throw 'Brak dysku 0 MUSI rzucic blad HWID' }
+          Write-Host 'Testy HWID (mock CIM): PASS'
+
+  ascii-check:
+    name: Skrypty = czysty ASCII
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Brak znaków non-ASCII w treści skryptów (poza BOM)
+        run: |
+          fail=0
+          for f in $(find client deploy -name '*.ps1' -o -name '*.psm1' -o -name '*.bat' -o -name '*.sh'); do
+            if tail -c +4 "$f" | LC_ALL=C grep -qP '[^\x00-\x7F]'; then echo "non-ASCII: $f"; fail=1; fi
+          done
+          exit $fail
+
+  backend-tests:
+    name: Backend (Node + PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd backend && npm ci
+      - run: cd backend && npm test
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          SECURITY_PEPPER: ci-pepper
+          LICENSE_KEY_PEPPER: ci-license-pepper
+          SECRET_ENC_KEY: ${{ secrets.CI_SECRET_ENC_KEY }}
+          ALLOW_EPHEMERAL_KEYS: 'true'
+          ARGON2_MEMORY_COST: '19456'
+          ARGON2_TIME_COST: '2'
+
+  secret-scan:
+    name: Skan sekretów (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

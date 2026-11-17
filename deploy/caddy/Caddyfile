@@ -1,0 +1,26 @@
+# D01i Tweakz - reverse proxy Caddy z automatycznym HTTPS (Let's Encrypt)
+# Podmień __DOMAIN__ i __EMAIL__ przed instalacją (robi to install-ubuntu.sh).
+
+__DOMAIN__ {
+	email __EMAIL__
+
+	# Panel administratora i API - tylko HTTPS, HTTP przekierowane automatycznie
+	reverse_proxy 127.0.0.1:8080 {
+		# Nagłówki bezpieczeństwa dodatkowe (aplikacja też ustawia helmet)
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Bezpieczeństwo transportu
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	log {
+		output file /var/log/caddy/d01i-access.log
+		format json
+	}
+}
